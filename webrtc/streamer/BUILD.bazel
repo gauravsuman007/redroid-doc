@@ -1,0 +1,48 @@
+# redroid WebRTC streamer. Built inside the android-cuttlefish bazel workspace:
+# this directory is copied to base/cvd/cuttlefish/host/frontend/redroid_webrtc/.
+load("//cuttlefish/bazel:rules.bzl", "cf_cc_binary", "cf_cc_library")
+
+package(
+    default_visibility = ["//:android_cuttlefish"],
+)
+
+cf_cc_library(
+    name = "logging_connection_observer",
+    srcs = ["logging_connection_observer.cpp"],
+    hdrs = ["logging_connection_observer.h"],
+    clang_tidy_enabled = False,
+    depend_on_what_you_use_enabled = False,
+    include_cleaner_enabled = False,
+    deps = [
+        "//cuttlefish/host/frontend/webrtc/libdevice:connection_observer",
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/log",
+        "@jsoncpp",
+    ],
+)
+
+cf_cc_binary(
+    name = "redroid_webrtc",
+    srcs = ["main.cpp"],
+    clang_tidy_enabled = False,
+    depend_on_what_you_use_enabled = False,
+    include_cleaner_enabled = False,
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
+    deps = [
+        ":logging_connection_observer",
+        "//cuttlefish/host/frontend/webrtc:libcuttlefish_webrtc_client_server",
+        "//cuttlefish/host/frontend/webrtc:libcuttlefish_webrtc_cvd_abgr_video_frame_buffer",
+        "//cuttlefish/host/frontend/webrtc/libdevice:connection_observer",
+        "//cuttlefish/host/frontend/webrtc/libdevice:recording_manager",
+        "//cuttlefish/host/frontend/webrtc/libdevice:streamer",
+        "//cuttlefish/host/frontend/webrtc/libdevice:video_sink",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:globals",
+        "@abseil-cpp//absl/log:initialize",
+        "@gflags",
+        "@libdrm//:libdrm_fourcc",
+        "@libwebrtc",
+    ],
+)
