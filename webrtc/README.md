@@ -105,12 +105,22 @@ configuration, see Cuttlefish's operator.
 
 ## Security
 
-The web UI has **no authentication**. Anyone who can reach it controls the
-devices, including a full adb shell from the browser. Keep it on a trusted
-network, or bind it to localhost (`LISTEN_ADDR=127.0.0.1`) and put an
-authenticating reverse proxy in front of it (for example Caddy with
-`basic_auth`, oauth2-proxy, Tailscale or Cloudflare Access). Don't publish
-the redroid containers' adb port (5555) either.
+The web UI has **no authentication** of its own. Anyone who can reach it
+controls the devices, including a full adb shell from the browser. Keep it on
+a trusted network, or use the `auth` profile. It binds the web UI to
+localhost and puts a Caddy reverse proxy with HTTPS and a password in front of it:
+
+```bash
+export AUTH_PASSWORD_HASH="$(docker run --rm caddy:2.8.4 caddy hash-password -p 'your-password')"
+LISTEN_ADDR=127.0.0.1 HTTPS_PORT=0 docker compose --profile auth up -d
+# https://<host>:9443/  user: admin (AUTH_USER), certificate from Caddy's local CA
+# AUTH_SITE=android.example.com gets a public certificate instead (ports 80/443)
+```
+
+Other options, such as oauth2-proxy, Tailscale or Cloudflare Access, work the
+same way in front of `127.0.0.1:8080`. Only signaling goes through the proxy;
+media flows over the UDP port range. Don't publish the redroid containers'
+adb port (5555) either.
 
 ## Features
 

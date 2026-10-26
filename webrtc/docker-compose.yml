@@ -54,8 +54,9 @@ services:
       # Or follow every container labelled redroid.webrtc instead of listing
       # them (also mount the docker socket below, which grants root on the host):
       # REDROID_DISCOVERY: "docker"
-      HTTPS_PORT: "8443"
-      HTTP_PORT: "8080"
+      LISTEN_ADDR: ${LISTEN_ADDR:-0.0.0.0}
+      HTTPS_PORT: ${HTTPS_PORT:-8443}
+      HTTP_PORT: ${HTTP_PORT:-8080}
       UDP_PORT_MIN: "15550"
       UDP_PORT_MAX: "15599"
     volumes:
@@ -63,6 +64,24 @@ services:
       # - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
       - redroid1
+
+  # Optional login in front of the web UI:
+  #   AUTH_PASSWORD_HASH=$(docker run --rm caddy:2.8.4 caddy hash-password -p 'secret') \
+  #   LISTEN_ADDR=127.0.0.1 HTTPS_PORT=0 docker compose --profile auth up -d
+  # then open https://<host>:9443/ (user "admin" unless AUTH_USER is set).
+  auth-proxy:
+    image: caddy:2.8.4
+    profiles: ["auth"]
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      AUTH_USER: ${AUTH_USER:-admin}
+      AUTH_PASSWORD_HASH: ${AUTH_PASSWORD_HASH:-}
+      AUTH_SITE: ${AUTH_SITE:-:9443}
+      WEBUI_PORT: ${HTTP_PORT:-8080}
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy:/data
 
 networks:
   redroid:
