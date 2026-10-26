@@ -125,7 +125,8 @@ the redroid containers' adb port (5555) either.
 | Multiple devices, device list page | ✅ |
 | Automatic discovery of labelled Docker containers | ✅ |
 | Auto reconnect after device restarts | ✅ |
-| Rotation, camera, microphone, sensors, location, bluetooth | ❌ (not implemented) |
+| Device rotation (stream and touch follow the device orientation) | ✅ |
+| Rotate button of the web UI, camera, microphone, sensors, location, bluetooth | ❌ (not implemented) |
 
 ## Troubleshooting
 

@@ -368,7 +368,17 @@ class DeviceConnection {
       disconnected_ = false;
     }
     decoder_ = H264Decoder::Create(
-        [repeater](std::shared_ptr<VideoFrameBuffer> frame) {
+        [this, repeater](std::shared_ptr<VideoFrameBuffer> frame) {
+          // The device restarts its encoder with new dimensions on rotation.
+          // The browser scales touches to the frame size, and the scrcpy
+          // server drops events whose screen size differs from the current
+          // video size, so follow the frames.
+          if (frame->width() != input_->width() ||
+              frame->height() != input_->height()) {
+            LOG(INFO) << "Video size is now " << frame->width() << "x"
+                      << frame->height();
+            input_->SetScreenSize(frame->width(), frame->height());
+          }
           if (repeater) {
             repeater->OnFrame(std::move(frame));
           }
