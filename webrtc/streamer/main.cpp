@@ -457,6 +457,7 @@ bool WaitForDevice(const Adb& adb) {
 
 int RunScrcpy() {
   Adb adb(FLAGS_adb, FLAGS_adb_serial);
+  adb.set_cancelled_check([] { return !g_running; });
   if (!WaitForDevice(adb)) {
     return 1;
   }
@@ -523,7 +524,10 @@ int RunScrcpy() {
     }
     LOG(WARNING) << "Reconnecting to " << adb.serial() << " in "
                  << backoff.count() << "s";
-    std::this_thread::sleep_for(backoff);
+    auto wake = std::chrono::steady_clock::now() + backoff;
+    while (g_running && std::chrono::steady_clock::now() < wake) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
     backoff = std::min(backoff * 2, std::chrono::seconds(30));
     WaitForDevice(adb);
   }

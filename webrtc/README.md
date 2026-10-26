@@ -56,11 +56,33 @@ a new name and IP, then list it in `REDROID_DEVICES`:
 REDROID_DEVICES: "redroid1=172.30.0.11:5555,redroid2=172.30.0.12:5555"
 ```
 
+### Automatic discovery
+
+Instead of listing the devices, `redroid-webrtc` can follow the Docker
+containers that have the `redroid.webrtc` label. Set
+`REDROID_DISCOVERY=docker` and mount the Docker socket
+(`/var/run/docker.sock:/var/run/docker.sock:ro`, which effectively grants
+root on the host). Containers are checked every 5 seconds. A streamer starts
+when a labelled container starts, and stops when it goes away.
+
+```bash
+docker run -itd --privileged --label redroid.webrtc=true \
+  --label redroid.webrtc.name=pixel redroid/redroid:14.0.0_64only-latest
+```
+
+| Label | Default | |
+|---|---|---|
+| `redroid.webrtc` | | required, any value |
+| `redroid.webrtc.name` | container name | device name in the web UI |
+| `redroid.webrtc.network` | first network | network whose IP is used to reach adbd |
+| `redroid.webrtc.port` | `5555` | adbd port |
+
 Environment variables of `redroid-webrtc`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `REDROID_DEVICES` | required | Comma separated `name=host:port` entries (`host:port` alone uses the host as name) |
+| `REDROID_DEVICES` | | Comma separated `name=host:port` entries (`host:port` alone uses the host as name). Required unless discovery is on. |
+| `REDROID_DISCOVERY` | | `docker` to follow labelled containers (see above) |
 | `HTTPS_PORT` | `8443` | Web UI over HTTPS (`0` disables) |
 | `HTTP_PORT` | `8080` | Web UI over plain HTTP |
 | `LISTEN_ADDR` | `0.0.0.0` | Address the web UI listens on |
@@ -101,6 +123,7 @@ the redroid containers' adb port (5555) either.
 | Device audio (Android 11+) | ✅ |
 | adb console in the browser (Cuttlefish's adb.js over a data channel) | ✅ |
 | Multiple devices, device list page | ✅ |
+| Automatic discovery of labelled Docker containers | ✅ |
 | Auto reconnect after device restarts | ✅ |
 | Rotation, camera, microphone, sensors, location, bluetooth | ❌ (not implemented) |
 

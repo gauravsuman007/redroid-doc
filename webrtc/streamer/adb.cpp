@@ -138,7 +138,7 @@ bool Adb::Connect(std::chrono::seconds timeout) const {
     return true;  // USB / emulator serial, nothing to connect.
   }
   auto deadline = std::chrono::steady_clock::now() + timeout;
-  while (std::chrono::steady_clock::now() < deadline) {
+  while (std::chrono::steady_clock::now() < deadline && !Cancelled()) {
     auto out = RunCommand({adb_path_, "connect", serial_});
     if (out && out->find("connected to") != std::string::npos) {
       // `adb connect` succeeds before the device is usable, check it.
@@ -162,7 +162,7 @@ std::optional<std::string> Adb::GetProp(const std::string& name) const {
 
 bool Adb::WaitForBoot(std::chrono::seconds timeout) const {
   auto deadline = std::chrono::steady_clock::now() + timeout;
-  while (std::chrono::steady_clock::now() < deadline) {
+  while (std::chrono::steady_clock::now() < deadline && !Cancelled()) {
     if (GetProp("sys.boot_completed") == "1") {
       return true;
     }

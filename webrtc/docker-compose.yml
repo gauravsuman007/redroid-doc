@@ -15,6 +15,9 @@ x-redroid: &redroid
   image: redroid/redroid:14.0.0_64only-latest
   privileged: true
   restart: unless-stopped
+  labels:
+    # Picked up automatically with REDROID_DISCOVERY=docker (see below).
+    redroid.webrtc: "true"
 
 services:
   redroid1:
@@ -48,12 +51,16 @@ services:
     environment:
       REDROID_DEVICES: "redroid1=172.30.0.11:5555"
       # REDROID_DEVICES: "redroid1=172.30.0.11:5555,redroid2=172.30.0.12:5555"
+      # Or follow every container labelled redroid.webrtc instead of listing
+      # them (also mount the docker socket below, which grants root on the host):
+      # REDROID_DISCOVERY: "docker"
       HTTPS_PORT: "8443"
       HTTP_PORT: "8080"
       UDP_PORT_MIN: "15550"
       UDP_PORT_MAX: "15599"
     volumes:
       - ./data/webrtc-cert:/var/lib/redroid-webrtc/cert
+      # - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
       - redroid1
 

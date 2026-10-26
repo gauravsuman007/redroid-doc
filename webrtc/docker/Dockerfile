@@ -43,7 +43,7 @@ COPY --from=build /out/ /
 FROM ${UBUNTU}
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      adb ca-certificates libavcodec60 libopus0 openssl tini \
+      adb ca-certificates curl jq libavcodec60 libopus0 openssl tini \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=artifacts /bin/redroid_webrtc /bin/operator /usr/bin/
 COPY --from=artifacts /html_client /usr/share/redroid-webrtc/html_client
