@@ -44,8 +44,10 @@
 
 #include "cuttlefish/host/frontend/redroid_webrtc/adb.h"
 #include "cuttlefish/host/frontend/redroid_webrtc/h264_decoder.h"
+#include "cuttlefish/host/frontend/redroid_webrtc/h264_passthrough.h"
 #include "cuttlefish/host/frontend/redroid_webrtc/logging_connection_observer.h"
 #include "cuttlefish/host/frontend/redroid_webrtc/redroid_connection_observer.h"
+#include "cuttlefish/host/frontend/redroid_webrtc/scrcpy_protocol.h"
 #include "cuttlefish/host/frontend/redroid_webrtc/scrcpy_session.h"
 #include "cuttlefish/host/frontend/webrtc/client_server.h"
 #include "cuttlefish/host/frontend/webrtc/cvd_abgr_video_frame_buffer.h"
@@ -72,6 +74,10 @@ DEFINE_int32(scrcpy_port, 27183,
              "Local port used to forward the scrcpy sockets.");
 DEFINE_int32(video_bit_rate, 8000000, "Bit rate of the device H.264 encoder.");
 DEFINE_bool(audio, true, "Stream device audio (Android 11+).");
+DEFINE_bool(
+    video_passthrough, false,
+    "Send the device's H.264 stream to browsers as is instead of decoding "
+    "and re-encoding it (VP8). Much cheaper; needs H.264 in the browser.");
 DEFINE_int32(width, 720, "Display width (test_pattern only).");
 DEFINE_int32(height, 1280, "Display height (test_pattern only).");
 DEFINE_int32(dpi, 0, "Display dpi, 0 to read it from the device.");
@@ -117,8 +123,9 @@ class LoggingOperatorObserver : public OperatorObserver {
 // frames when the screen content changes).
 class FrameRepeater {
  public:
-  explicit FrameRepeater(std::shared_ptr<VideoSink> sink)
-      : sink_(std::move(sink)), thread_([this] { Loop(); }) {}
+  // repeat=false only forwards frames: encoded frames must not be repeated.
+  FrameRepeater(std::shared_ptr<VideoSink> sink, bool repeat)
+      : sink_(std::move(sink)), repeat_(repeat), thread_([this] { Loop(); }) {}
 
   ~FrameRepeater() {
     {
@@ -139,6 +146,9 @@ class FrameRepeater {
   }
 
   void SendLastFrame() {
+    if (!repeat_) {
+      return;
+    }
     std::shared_ptr<VideoFrameBuffer> frame;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -159,7 +169,7 @@ class FrameRepeater {
       if (stop_) {
         break;
       }
-      if (last_frame_ &&
+      if (repeat_ && last_frame_ &&
           std::chrono::steady_clock::now() - last_sent_ >= kIdleRepeat) {
         auto frame = last_frame_;
         last_sent_ = std::chrono::steady_clock::now();
@@ -171,6 +181,7 @@ class FrameRepeater {
   }
 
   std::shared_ptr<VideoSink> sink_;
+  bool repeat_;
   std::mutex mutex_;
   std::condition_variable cv_;
   std::shared_ptr<VideoFrameBuffer> last_frame_;
@@ -367,24 +378,28 @@ class DeviceConnection {
       std::lock_guard<std::mutex> lock(mutex_);
       disconnected_ = false;
     }
-    decoder_ = H264Decoder::Create(
-        [this, repeater](std::shared_ptr<VideoFrameBuffer> frame) {
-          // The device restarts its encoder with new dimensions on rotation.
-          // The browser scales touches to the frame size, and the scrcpy
-          // server drops events whose screen size differs from the current
-          // video size, so follow the frames.
-          if (frame->width() != input_->width() ||
-              frame->height() != input_->height()) {
-            LOG(INFO) << "Video size is now " << frame->width() << "x"
-                      << frame->height();
-            input_->SetScreenSize(frame->width(), frame->height());
-          }
-          if (repeater) {
-            repeater->OnFrame(std::move(frame));
-          }
-        });
-    if (!decoder_) {
-      return false;
+    auto on_frame = [this, repeater](std::shared_ptr<VideoFrameBuffer> frame) {
+      // The device restarts its encoder with new dimensions on rotation. The
+      // browser scales touches to the frame size, and the scrcpy server drops
+      // events whose screen size differs from the current video size, so
+      // follow the frames.
+      if (frame->width() != input_->width() ||
+          frame->height() != input_->height()) {
+        LOG(INFO) << "Video size is now " << frame->width() << "x"
+                  << frame->height();
+        input_->SetScreenSize(frame->width(), frame->height());
+      }
+      if (repeater) {
+        repeater->OnFrame(std::move(frame));
+      }
+    };
+    if (FLAGS_video_passthrough) {
+      assembler_ = std::make_unique<H264FrameAssembler>(on_frame);
+    } else {
+      decoder_ = H264Decoder::Create(on_frame);
+      if (!decoder_) {
+        return false;
+      }
     }
     ScrcpySession::Options options;
     options.server_path = FLAGS_scrcpy_server;
@@ -396,7 +411,11 @@ class DeviceConnection {
     ScrcpySession::Callbacks callbacks;
     callbacks.on_video_packet = [this](const scrcpy::PacketHeader& header,
                                        const uint8_t* data, size_t size) {
-      decoder_->Decode(data, size, header.config);
+      if (assembler_) {
+        assembler_->OnPacket(data, size, header.config, header.key_frame);
+      } else {
+        decoder_->Decode(data, size, header.config);
+      }
     };
     callbacks.on_audio_packet = [audio](const uint8_t* data, size_t size) {
       if (audio) {
@@ -435,6 +454,7 @@ class DeviceConnection {
     input_->SetSender(nullptr);
     session_.reset();
     decoder_.reset();
+    assembler_.reset();
   }
 
   const ScrcpySession* session() const { return session_.get(); }
@@ -443,6 +463,7 @@ class DeviceConnection {
   const Adb& adb_;
   std::shared_ptr<DeviceInput> input_;
   std::unique_ptr<H264Decoder> decoder_;
+  std::unique_ptr<H264FrameAssembler> assembler_;
   std::unique_ptr<ScrcpySession> session_;
   std::mutex mutex_;
   std::condition_variable cv_;
@@ -489,6 +510,10 @@ int RunScrcpy() {
   bool has_audio = connection.session()->audio_enabled();
   connection.Disconnect();
 
+  if (FLAGS_video_passthrough) {
+    RegisterH264PassthroughEncoder(
+        [input] { input->Send(scrcpy::ResetVideo()); });
+  }
   auto setup =
       CreateStreamer(std::make_shared<RedroidConnectionObserverFactory>(
                          input, FLAGS_adb_serial),
@@ -509,8 +534,15 @@ int RunScrcpy() {
   }
   setup->streamer->SetHardwareSpec("Device", device_name);
   setup->streamer->SetHardwareSpec("adb", FLAGS_adb_serial);
-  FrameRepeater repeater(display);
-  input->on_client_connected = [&repeater] { repeater.SendLastFrame(); };
+  FrameRepeater repeater(display, /*repeat=*/!FLAGS_video_passthrough);
+  input->on_client_connected = [&repeater, input] {
+    if (FLAGS_video_passthrough) {
+      // New clients need a key frame, and an idle screen sends no frames.
+      input->Send(scrcpy::ResetVideo());
+    } else {
+      repeater.SendLastFrame();
+    }
+  };
   Register(*setup->streamer);
   LOG(INFO) << "Streaming '" << device_name << "' " << width << "x" << height
             << " dpi " << dpi << (has_audio ? " with audio" : " without audio");

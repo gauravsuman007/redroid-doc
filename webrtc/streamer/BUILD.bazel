@@ -71,6 +71,26 @@ cf_cc_library(
 )
 
 cf_cc_library(
+    name = "h264_passthrough",
+    srcs = ["h264_passthrough.cpp"],
+    hdrs = ["h264_passthrough.h"],
+    deps = [
+        "//cuttlefish/host/frontend/webrtc/libcommon:abgr_buffer",
+        "//cuttlefish/host/frontend/webrtc/libcommon:decoder_provider",
+        "//cuttlefish/host/frontend/webrtc/libcommon:decoder_provider_registry",
+        "//cuttlefish/host/frontend/webrtc/libcommon:encoder_provider",
+        "//cuttlefish/host/frontend/webrtc/libcommon:encoder_provider_registry",
+        "//cuttlefish/host/libs/screen_connector:video_frame_buffer",
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/log",
+        "@libwebrtc",
+    ],
+    clang_tidy_enabled = False,
+    depend_on_what_you_use_enabled = False,
+    include_cleaner_enabled = False,
+)
+
+cf_cc_library(
     name = "logging_connection_observer",
     srcs = ["logging_connection_observer.cpp"],
     hdrs = ["logging_connection_observer.h"],
@@ -112,8 +132,10 @@ cf_cc_binary(
     deps = [
         ":adb",
         ":h264_decoder",
+        ":h264_passthrough",
         ":logging_connection_observer",
         ":redroid_connection_observer",
+        ":scrcpy_protocol",
         ":scrcpy_session",
         "//cuttlefish/host/frontend/webrtc:libcuttlefish_webrtc_client_server",
         "//cuttlefish/host/frontend/webrtc:libcuttlefish_webrtc_cvd_abgr_video_frame_buffer",
@@ -148,6 +170,18 @@ cf_cc_test(
     name = "keymap_test",
     srcs = ["keymap_test.cpp"],
     deps = [":keymap"],
+    clang_tidy_enabled = False,
+    depend_on_what_you_use_enabled = False,
+    include_cleaner_enabled = False,
+)
+
+cf_cc_test(
+    name = "h264_passthrough_test",
+    srcs = ["h264_passthrough_test.cpp"],
+    # libvpx (via libwebrtc) defines hidden symbols in a separate asm library,
+    # which can't be resolved across shared objects.
+    linkstatic = True,
+    deps = [":h264_passthrough"],
     clang_tidy_enabled = False,
     depend_on_what_you_use_enabled = False,
     include_cleaner_enabled = False,

@@ -90,6 +90,22 @@ Environment variables of `redroid-webrtc`:
 | `TLS_CERT_DIR` | `/var/lib/redroid-webrtc/cert` | `cert.pem` and `key.pem`. A self-signed pair is generated if missing. |
 | `STREAMER_ARGS` | | Extra `redroid_webrtc` flags for every device, e.g. `--video_bit_rate=4000000 --fps=60 --audio=false` |
 
+### H.264 passthrough (recommended for many devices)
+
+By default the device's H.264 stream is decoded and re-encoded to VP8 for the
+browser. With `STREAMER_ARGS=--video_passthrough`, the device's H.264 goes to
+the browser unchanged:
+
+| 720p30, screen animating, one viewer (arm64) | CPU of the streamer |
+|---|---|
+| default (decode + VP8 encode) | ~33% of a core |
+| `--video_passthrough` | ~7% of a core |
+
+It also avoids a second lossy encode and its latency. All current browsers
+support H.264 in WebRTC. The bit rate is fixed (`--video_bit_rate`, default
+8 Mbps) rather than adapted to the network, and keyframes come from the device
+whenever a viewer joins or reports loss.
+
 Why host networking: browsers connect to the WebRTC media ports on the
 addresses the streamer advertises, so the streamer must see the host's real
 addresses. It reaches the redroid containers via their fixed IPs on the
@@ -126,7 +142,7 @@ adb port (5555) either.
 
 | | Status |
 |---|---|
-| Screen (H.264 from the device, re-encoded to VP8 for the browser) | ✅ |
+| Screen (H.264 from the device, re-encoded to VP8, or passed through as H.264) | ✅ |
 | Touch, multi-touch, mouse, wheel scroll | ✅ |
 | Keyboard (click the screen first, US layout key codes, modifiers) | ✅ |
 | Power, back, home, overview (menu), volume buttons | ✅ |
