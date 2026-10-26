@@ -1,39 +1,124 @@
 # redroid WebRTC streamer. Built inside the android-cuttlefish bazel workspace:
-# this directory is copied to base/cvd/cuttlefish/host/frontend/redroid_webrtc/.
-load("//cuttlefish/bazel:rules.bzl", "cf_cc_binary", "cf_cc_library")
+# this directory is copied to base/cvd/cuttlefish/host/frontend/redroid_webrtc/
+# (see webrtc/scripts/dev-build.sh).
+load("//cuttlefish/bazel:rules.bzl", "cf_cc_binary", "cf_cc_library", "cf_cc_test")
 
 package(
     default_visibility = ["//:android_cuttlefish"],
 )
 
 cf_cc_library(
-    name = "logging_connection_observer",
-    srcs = ["logging_connection_observer.cpp"],
-    hdrs = ["logging_connection_observer.h"],
+    name = "scrcpy_protocol",
+    srcs = ["scrcpy_protocol.cpp"],
+    hdrs = ["scrcpy_protocol.h"],
     clang_tidy_enabled = False,
     depend_on_what_you_use_enabled = False,
     include_cleaner_enabled = False,
+)
+
+cf_cc_library(
+    name = "keymap",
+    srcs = ["keymap.cpp"],
+    hdrs = ["keymap.h"],
+    clang_tidy_enabled = False,
+    depend_on_what_you_use_enabled = False,
+    include_cleaner_enabled = False,
+)
+
+cf_cc_library(
+    name = "adb",
+    srcs = ["adb.cpp"],
+    hdrs = ["adb.h"],
+    deps = ["@abseil-cpp//absl/log"],
+    clang_tidy_enabled = False,
+    depend_on_what_you_use_enabled = False,
+    include_cleaner_enabled = False,
+)
+
+cf_cc_library(
+    name = "scrcpy_session",
+    srcs = ["scrcpy_session.cpp"],
+    hdrs = ["scrcpy_session.h"],
+    deps = [
+        ":adb",
+        ":scrcpy_protocol",
+        "@abseil-cpp//absl/log",
+        "@fmt",
+    ],
+    clang_tidy_enabled = False,
+    depend_on_what_you_use_enabled = False,
+    include_cleaner_enabled = False,
+)
+
+# Uses the host's FFmpeg (libavcodec-dev) for H.264 decoding.
+cf_cc_library(
+    name = "h264_decoder",
+    srcs = ["h264_decoder.cpp"],
+    hdrs = ["h264_decoder.h"],
+    linkopts = [
+        "-lavcodec",
+        "-lavutil",
+    ],
+    deps = [
+        "//cuttlefish/host/libs/screen_connector:video_frame_buffer",
+        "@abseil-cpp//absl/log",
+        "@libdrm//:libdrm_fourcc",
+        "@libyuv",
+    ],
+    clang_tidy_enabled = False,
+    depend_on_what_you_use_enabled = False,
+    include_cleaner_enabled = False,
+)
+
+cf_cc_library(
+    name = "logging_connection_observer",
+    srcs = ["logging_connection_observer.cpp"],
+    hdrs = ["logging_connection_observer.h"],
     deps = [
         "//cuttlefish/host/frontend/webrtc/libdevice:connection_observer",
         "//cuttlefish/result",
         "@abseil-cpp//absl/log",
         "@jsoncpp",
     ],
+    clang_tidy_enabled = False,
+    depend_on_what_you_use_enabled = False,
+    include_cleaner_enabled = False,
+)
+
+cf_cc_library(
+    name = "redroid_connection_observer",
+    srcs = ["redroid_connection_observer.cpp"],
+    hdrs = ["redroid_connection_observer.h"],
+    deps = [
+        ":keymap",
+        ":scrcpy_protocol",
+        "//cuttlefish/host/frontend/webrtc:libcuttlefish_webrtc_adb_handler",
+        "//cuttlefish/host/frontend/webrtc/libdevice:connection_observer",
+        "//cuttlefish/result",
+        "@abseil-cpp//absl/log",
+        "@jsoncpp",
+    ],
+    clang_tidy_enabled = False,
+    depend_on_what_you_use_enabled = False,
+    include_cleaner_enabled = False,
 )
 
 cf_cc_binary(
     name = "redroid_webrtc",
     srcs = ["main.cpp"],
-    clang_tidy_enabled = False,
-    depend_on_what_you_use_enabled = False,
-    include_cleaner_enabled = False,
     target_compatible_with = [
         "@platforms//os:linux",
     ],
     deps = [
+        ":adb",
+        ":h264_decoder",
         ":logging_connection_observer",
+        ":redroid_connection_observer",
+        ":scrcpy_session",
         "//cuttlefish/host/frontend/webrtc:libcuttlefish_webrtc_client_server",
         "//cuttlefish/host/frontend/webrtc:libcuttlefish_webrtc_cvd_abgr_video_frame_buffer",
+        "//cuttlefish/host/frontend/webrtc/libdevice:audio_frame_buffer",
+        "//cuttlefish/host/frontend/webrtc/libdevice:audio_sink",
         "//cuttlefish/host/frontend/webrtc/libdevice:connection_observer",
         "//cuttlefish/host/frontend/webrtc/libdevice:recording_manager",
         "//cuttlefish/host/frontend/webrtc/libdevice:streamer",
@@ -45,4 +130,25 @@ cf_cc_binary(
         "@libdrm//:libdrm_fourcc",
         "@libwebrtc",
     ],
+    clang_tidy_enabled = False,
+    depend_on_what_you_use_enabled = False,
+    include_cleaner_enabled = False,
+)
+
+cf_cc_test(
+    name = "scrcpy_protocol_test",
+    srcs = ["scrcpy_protocol_test.cpp"],
+    deps = [":scrcpy_protocol"],
+    clang_tidy_enabled = False,
+    depend_on_what_you_use_enabled = False,
+    include_cleaner_enabled = False,
+)
+
+cf_cc_test(
+    name = "keymap_test",
+    srcs = ["keymap_test.cpp"],
+    deps = [":keymap"],
+    clang_tidy_enabled = False,
+    depend_on_what_you_use_enabled = False,
+    include_cleaner_enabled = False,
 )

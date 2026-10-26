@@ -172,10 +172,8 @@ void LoggingConnectionObserver::OnKmlLocationsChannelOpen(
     std::function<bool(const uint8_t*, size_t)>) {}
 void LoggingConnectionObserver::OnGpxLocationsChannelOpen(
     std::function<bool(const uint8_t*, size_t)>) {}
-void LoggingConnectionObserver::OnKmlLocationsMessage(const uint8_t*, size_t) {
-}
-void LoggingConnectionObserver::OnGpxLocationsMessage(const uint8_t*, size_t) {
-}
+void LoggingConnectionObserver::OnKmlLocationsMessage(const uint8_t*, size_t) {}
+void LoggingConnectionObserver::OnGpxLocationsMessage(const uint8_t*, size_t) {}
 
 void LoggingConnectionObserver::OnCameraData(const std::vector<char>&) {}
 

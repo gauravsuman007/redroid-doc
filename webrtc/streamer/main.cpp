@@ -15,50 +15,79 @@
  */
 
 // redroid_webrtc: streams a redroid device to browsers through the cuttlefish
-// WebRTC operator. Phase 0 spike: renders a test pattern instead of the device
-// screen and only logs input, to validate the cuttlefish streamer integration.
+// WebRTC operator.
+//
+// --source=scrcpy (default): video, audio and input go through a scrcpy
+//   server started on the device over adb.
+// --source=test_pattern: renders a test pattern and logs input, to check the
+//   WebRTC setup without a device.
 
+#include <gflags/gflags.h>
 #include <signal.h>
 #include <stdint.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <gflags/gflags.h>
 
 #include "absl/log/globals.h"
 #include "absl/log/initialize.h"
 #include "absl/log/log.h"
 #include "drm/drm_fourcc.h"
 
+#include "cuttlefish/host/frontend/redroid_webrtc/adb.h"
+#include "cuttlefish/host/frontend/redroid_webrtc/h264_decoder.h"
 #include "cuttlefish/host/frontend/redroid_webrtc/logging_connection_observer.h"
+#include "cuttlefish/host/frontend/redroid_webrtc/redroid_connection_observer.h"
+#include "cuttlefish/host/frontend/redroid_webrtc/scrcpy_session.h"
 #include "cuttlefish/host/frontend/webrtc/client_server.h"
 #include "cuttlefish/host/frontend/webrtc/cvd_abgr_video_frame_buffer.h"
+#include "cuttlefish/host/frontend/webrtc/libdevice/audio_frame_buffer.h"
+#include "cuttlefish/host/frontend/webrtc/libdevice/audio_sink.h"
 #include "cuttlefish/host/frontend/webrtc/libdevice/recording_manager.h"
 #include "cuttlefish/host/frontend/webrtc/libdevice/streamer.h"
 #include "cuttlefish/host/frontend/webrtc/libdevice/video_sink.h"
 
-DEFINE_string(device_id, "redroid", "Id the device registers with at the operator.");
+DEFINE_string(source, "scrcpy", "Frame/input source: scrcpy or test_pattern.");
+DEFINE_string(device_id, "redroid",
+              "Id the device registers with at the operator.");
 DEFINE_string(operator_path, "/run/cuttlefish/operator",
               "Unix socket of the cuttlefish operator.");
 DEFINE_string(client_dir, "/usr/share/redroid-webrtc/html_client",
               "Directory with the cuttlefish html client files.");
-DEFINE_int32(width, 720, "Display width.");
-DEFINE_int32(height, 1280, "Display height.");
-DEFINE_int32(dpi, 320, "Display dpi.");
-DEFINE_int32(fps, 30, "Frames per second.");
+DEFINE_string(adb, "adb", "Path of the adb client.");
+DEFINE_string(adb_serial, "127.0.0.1:5555",
+              "adb serial of the redroid container (host:port).");
+DEFINE_string(scrcpy_server, "/usr/share/redroid-webrtc/scrcpy-server",
+              "Path of the scrcpy server jar.");
+DEFINE_string(scrcpy_version, "3.3.1", "Version of the scrcpy server jar.");
+DEFINE_int32(scrcpy_port, 27183,
+             "Local port used to forward the scrcpy sockets.");
+DEFINE_int32(video_bit_rate, 8000000, "Bit rate of the device H.264 encoder.");
+DEFINE_bool(audio, true, "Stream device audio (Android 11+).");
+DEFINE_int32(width, 720, "Display width (test_pattern only).");
+DEFINE_int32(height, 1280, "Display height (test_pattern only).");
+DEFINE_int32(dpi, 0, "Display dpi, 0 to read it from the device.");
+DEFINE_int32(fps, 30, "Max frames per second.");
 DEFINE_int32(udp_port_min, 15550, "First UDP port WebRTC may use.");
 DEFINE_int32(udp_port_max, 15599, "Last UDP port WebRTC may use.");
+DEFINE_int32(boot_timeout_s, 600, "How long to wait for the device to boot.");
 
 namespace redroid {
 namespace {
 
 using cuttlefish::CvdAbgrVideoFrameBuffer;
+using cuttlefish::VideoFrameBuffer;
+using cuttlefish::webrtc_streaming::AudioFrameBuffer;
+using cuttlefish::webrtc_streaming::AudioSink;
+using cuttlefish::webrtc_streaming::ConnectionObserverFactory;
 using cuttlefish::webrtc_streaming::OperatorObserver;
 using cuttlefish::webrtc_streaming::RecordingManager;
 using cuttlefish::webrtc_streaming::Streamer;
@@ -66,8 +95,15 @@ using cuttlefish::webrtc_streaming::StreamerConfig;
 using cuttlefish::webrtc_streaming::VideoSink;
 
 constexpr auto kDisplayLabel = "display_0";
+constexpr auto kAudioLabel = "audio-0";
 
 std::atomic<bool> g_running{true};
+
+int64_t NowUs() {
+  return std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
 
 class LoggingOperatorObserver : public OperatorObserver {
  public:
@@ -76,15 +112,164 @@ class LoggingOperatorObserver : public OperatorObserver {
   void OnError() override { LOG(ERROR) << "Error in connection with operator"; }
 };
 
-// Renders moving colour bars plus a square at the last pointer position.
-// ABGR8888 is stored as R,G,B,A bytes in memory (little endian).
+// Holds the latest frame and re-sends it while the screen is idle, so new
+// clients and the encoder always have a recent picture (scrcpy only sends
+// frames when the screen content changes).
+class FrameRepeater {
+ public:
+  explicit FrameRepeater(std::shared_ptr<VideoSink> sink)
+      : sink_(std::move(sink)), thread_([this] { Loop(); }) {}
+
+  ~FrameRepeater() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stop_ = true;
+    }
+    cv_.notify_all();
+    thread_.join();
+  }
+
+  void OnFrame(std::shared_ptr<VideoFrameBuffer> frame) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      last_frame_ = frame;
+      last_sent_ = std::chrono::steady_clock::now();
+    }
+    sink_->OnFrame(std::move(frame), NowUs());
+  }
+
+  void SendLastFrame() {
+    std::shared_ptr<VideoFrameBuffer> frame;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      frame = last_frame_;
+      last_sent_ = std::chrono::steady_clock::now();
+    }
+    if (frame) {
+      sink_->OnFrame(frame, NowUs());
+    }
+  }
+
+ private:
+  void Loop() {
+    constexpr auto kIdleRepeat = std::chrono::milliseconds(500);
+    std::unique_lock<std::mutex> lock(mutex_);
+    while (!stop_) {
+      cv_.wait_for(lock, kIdleRepeat);
+      if (stop_) {
+        break;
+      }
+      if (last_frame_ &&
+          std::chrono::steady_clock::now() - last_sent_ >= kIdleRepeat) {
+        auto frame = last_frame_;
+        last_sent_ = std::chrono::steady_clock::now();
+        lock.unlock();
+        sink_->OnFrame(frame, NowUs());
+        lock.lock();
+      }
+    }
+  }
+
+  std::shared_ptr<VideoSink> sink_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  std::shared_ptr<VideoFrameBuffer> last_frame_;
+  std::chrono::steady_clock::time_point last_sent_;
+  bool stop_ = false;
+  std::thread thread_;
+};
+
+// Raw scrcpy audio (48kHz stereo s16le) cut into the 10ms chunks WebRTC wants.
+class PcmChunker {
+ public:
+  static constexpr int kSampleRate = 48000;
+  static constexpr int kChannels = 2;
+  static constexpr int kBytesPerFrame = kChannels * 2;
+  static constexpr int kFramesPerChunk = kSampleRate / 100;
+
+  explicit PcmChunker(std::shared_ptr<AudioSink> sink)
+      : sink_(std::move(sink)) {}
+
+  void OnData(const uint8_t* data, size_t size) {
+    pending_.insert(pending_.end(), data, data + size);
+    constexpr size_t kChunkBytes = kFramesPerChunk * kBytesPerFrame;
+    size_t offset = 0;
+    while (pending_.size() - offset >= kChunkBytes) {
+      Chunk chunk(pending_.data() + offset);
+      sink_->OnFrame(chunk, NowUs());
+      offset += kChunkBytes;
+    }
+    pending_.erase(pending_.begin(), pending_.begin() + offset);
+  }
+
+ private:
+  class Chunk : public AudioFrameBuffer {
+   public:
+    explicit Chunk(const uint8_t* data) : data_(data) {}
+    int bits_per_sample() const override { return 16; }
+    int sample_rate() const override { return kSampleRate; }
+    int channels() const override { return kChannels; }
+    int frames() const override { return kFramesPerChunk; }
+    const uint8_t* data() const override { return data_; }
+
+   private:
+    const uint8_t* data_;
+  };
+
+  std::shared_ptr<AudioSink> sink_;
+  std::vector<uint8_t> pending_;
+};
+
+struct StreamerSetup {
+  std::unique_ptr<cuttlefish::ClientFilesServer> client_server;
+  std::unique_ptr<RecordingManager> recording_manager;
+  std::unique_ptr<Streamer> streamer;
+};
+
+std::optional<StreamerSetup> CreateStreamer(
+    std::shared_ptr<ConnectionObserverFactory> factory, int adb_port) {
+  StreamerSetup setup;
+  setup.client_server = cuttlefish::ClientFilesServer::New(FLAGS_client_dir);
+  if (!setup.client_server) {
+    LOG(ERROR) << "Failed to serve client files from " << FLAGS_client_dir;
+    return std::nullopt;
+  }
+  StreamerConfig config;
+  config.device_id = FLAGS_device_id;
+  config.client_files_port = setup.client_server->port();
+  config.operator_path = FLAGS_operator_path;
+  config.udp_port_range = {static_cast<uint16_t>(FLAGS_udp_port_min),
+                           static_cast<uint16_t>(FLAGS_udp_port_max)};
+  config.tcp_port_range = config.udp_port_range;
+  config.adb_port = adb_port;
+  config.enable_mouse = false;
+  config.enable_gamepad = false;
+
+  setup.recording_manager = std::make_unique<RecordingManager>();
+  setup.streamer = Streamer::Create(config, *setup.recording_manager, factory);
+  if (!setup.streamer) {
+    LOG(ERROR) << "Failed to create streamer";
+    return std::nullopt;
+  }
+  return setup;
+}
+
+void Register(Streamer& streamer) {
+  static auto operator_observer = std::make_shared<LoggingOperatorObserver>();
+  streamer.Register(operator_observer);
+  LOG(INFO) << "Device '" << FLAGS_device_id << "' registered via "
+            << FLAGS_operator_path;
+}
+
+// ---------------------------------------------------------------- test pattern
+
 class TestPattern {
  public:
   TestPattern(int width, int height)
       : width_(width), height_(height), pixels_(width * height * 4) {}
 
-  std::shared_ptr<CvdAbgrVideoFrameBuffer> Render(
-      int frame, const PointerState& pointer) {
+  std::shared_ptr<CvdAbgrVideoFrameBuffer> Render(int frame,
+                                                  const PointerState& pointer) {
     static constexpr uint8_t kBars[8][3] = {
         {255, 255, 255}, {255, 255, 0}, {0, 255, 255}, {0, 255, 0},
         {255, 0, 255},   {255, 0, 0},   {0, 0, 255},   {16, 16, 16}};
@@ -123,64 +308,227 @@ class TestPattern {
   std::vector<uint8_t> pixels_;
 };
 
-int Main() {
-  auto client_server = cuttlefish::ClientFilesServer::New(FLAGS_client_dir);
-  if (!client_server) {
-    LOG(ERROR) << "Failed to serve client files from " << FLAGS_client_dir;
-    return 1;
-  }
-
-  StreamerConfig config;
-  config.device_id = FLAGS_device_id;
-  config.client_files_port = client_server->port();
-  config.operator_path = FLAGS_operator_path;
-  config.udp_port_range = {static_cast<uint16_t>(FLAGS_udp_port_min),
-                           static_cast<uint16_t>(FLAGS_udp_port_max)};
-  config.tcp_port_range = config.udp_port_range;
-  config.adb_port = 0;
-  config.enable_mouse = false;
-  config.enable_gamepad = false;
-
+int RunTestPattern() {
   auto pointer = std::make_shared<PointerState>();
-  auto observer_factory =
-      std::make_shared<LoggingConnectionObserverFactory>(pointer);
-
-  RecordingManager recording_manager;
-  auto streamer = Streamer::Create(config, recording_manager, observer_factory);
-  if (!streamer) {
-    LOG(ERROR) << "Failed to create streamer";
+  auto setup = CreateStreamer(
+      std::make_shared<LoggingConnectionObserverFactory>(pointer), 0);
+  if (!setup) {
     return 1;
   }
-
-  std::shared_ptr<VideoSink> display = streamer->AddDisplay(
-      kDisplayLabel, FLAGS_width, FLAGS_height, FLAGS_dpi, /*touch_enabled=*/true);
-  if (!display) {
-    LOG(ERROR) << "Failed to add display";
-    return 1;
-  }
-  streamer->SetHardwareSpec("Device", std::string("redroid (test pattern)"));
-
-  auto operator_observer = std::make_shared<LoggingOperatorObserver>();
-  streamer->Register(operator_observer);
-  LOG(INFO) << "Streaming " << FLAGS_width << "x" << FLAGS_height << "@"
-            << FLAGS_fps << " as '" << FLAGS_device_id << "' via "
-            << FLAGS_operator_path;
+  int dpi = FLAGS_dpi > 0 ? FLAGS_dpi : 320;
+  auto display = setup->streamer->AddDisplay(kDisplayLabel, FLAGS_width,
+                                             FLAGS_height, dpi, true);
+  setup->streamer->SetHardwareSpec("Device", std::string("test pattern"));
+  Register(*setup->streamer);
 
   TestPattern pattern(FLAGS_width, FLAGS_height);
   auto frame_interval = std::chrono::microseconds(1000000 / FLAGS_fps);
   auto next_frame = std::chrono::steady_clock::now();
   for (int frame = 0; g_running; frame++) {
-    auto buffer = pattern.Render(frame, *pointer);
-    int64_t timestamp_us =
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::system_clock::now().time_since_epoch())
-            .count();
-    display->OnFrame(buffer, timestamp_us);
+    display->OnFrame(pattern.Render(frame, *pointer), NowUs());
     next_frame += frame_interval;
     std::this_thread::sleep_until(next_frame);
   }
+  setup->streamer->Unregister();
+  return 0;
+}
 
-  streamer->Unregister();
+// ---------------------------------------------------------------------- scrcpy
+
+int ReadDpi(const Adb& adb) {
+  if (FLAGS_dpi > 0) {
+    return FLAGS_dpi;
+  }
+  for (const char* prop : {"ro.sf.lcd_density", "ro.boot.redroid_dpi"}) {
+    auto value = adb.GetProp(prop);
+    if (value && !value->empty()) {
+      int dpi = atoi(value->c_str());
+      if (dpi > 0) {
+        return dpi;
+      }
+    }
+  }
+  return 320;
+}
+
+int AdbPort(const std::string& serial) {
+  auto colon = serial.rfind(':');
+  return colon == std::string::npos ? 0 : atoi(serial.c_str() + colon + 1);
+}
+
+// Owns one scrcpy session plus its decoder and reports disconnections.
+class DeviceConnection {
+ public:
+  DeviceConnection(const Adb& adb, std::shared_ptr<DeviceInput> input)
+      : adb_(adb), input_(std::move(input)) {}
+
+  bool Connect(FrameRepeater* repeater, PcmChunker* audio) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      disconnected_ = false;
+    }
+    decoder_ = H264Decoder::Create(
+        [repeater](std::shared_ptr<VideoFrameBuffer> frame) {
+          if (repeater) {
+            repeater->OnFrame(std::move(frame));
+          }
+        });
+    if (!decoder_) {
+      return false;
+    }
+    ScrcpySession::Options options;
+    options.server_path = FLAGS_scrcpy_server;
+    options.server_version = FLAGS_scrcpy_version;
+    options.local_port = FLAGS_scrcpy_port;
+    options.max_fps = FLAGS_fps;
+    options.video_bit_rate = FLAGS_video_bit_rate;
+    options.audio = FLAGS_audio;
+    ScrcpySession::Callbacks callbacks;
+    callbacks.on_video_packet = [this](const scrcpy::PacketHeader& header,
+                                       const uint8_t* data, size_t size) {
+      decoder_->Decode(data, size, header.config);
+    };
+    callbacks.on_audio_packet = [audio](const uint8_t* data, size_t size) {
+      if (audio) {
+        audio->OnData(data, size);
+      }
+    };
+    callbacks.on_disconnected = [this] {
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        disconnected_ = true;
+      }
+      cv_.notify_all();
+    };
+    session_ = std::make_unique<ScrcpySession>(adb_, options, callbacks);
+    if (!session_->Start()) {
+      session_.reset();
+      return false;
+    }
+    input_->SetScreenSize(session_->video_header().width,
+                          session_->video_header().height);
+    input_->SetSender(
+        [session = session_.get()](const std::vector<uint8_t>& msg) {
+          return session->SendControl(msg);
+        });
+    return true;
+  }
+
+  void WaitForDisconnect() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [this] { return disconnected_ || !g_running; });
+  }
+
+  void Interrupt() { cv_.notify_all(); }
+
+  void Disconnect() {
+    input_->SetSender(nullptr);
+    session_.reset();
+    decoder_.reset();
+  }
+
+  const ScrcpySession* session() const { return session_.get(); }
+
+ private:
+  const Adb& adb_;
+  std::shared_ptr<DeviceInput> input_;
+  std::unique_ptr<H264Decoder> decoder_;
+  std::unique_ptr<ScrcpySession> session_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  bool disconnected_ = false;
+};
+
+DeviceConnection* g_connection = nullptr;
+
+bool WaitForDevice(const Adb& adb) {
+  LOG(INFO) << "Waiting for adb device " << adb.serial();
+  auto timeout = std::chrono::seconds(FLAGS_boot_timeout_s);
+  if (!adb.Connect(timeout)) {
+    LOG(ERROR) << "Could not connect to " << adb.serial();
+    return false;
+  }
+  if (!adb.WaitForBoot(timeout)) {
+    LOG(ERROR) << adb.serial() << " did not finish booting";
+    return false;
+  }
+  return true;
+}
+
+int RunScrcpy() {
+  Adb adb(FLAGS_adb, FLAGS_adb_serial);
+  if (!WaitForDevice(adb)) {
+    return 1;
+  }
+  int dpi = ReadDpi(adb);
+
+  auto input = std::make_shared<DeviceInput>();
+  DeviceConnection connection(adb, input);
+  g_connection = &connection;
+
+  // The first session tells us the display size and whether audio works,
+  // which are needed to create the WebRTC tracks before any frame flows.
+  if (!connection.Connect(nullptr, nullptr)) {
+    LOG(ERROR) << "Failed to start scrcpy on " << adb.serial();
+    return 1;
+  }
+  int width = connection.session()->video_header().width;
+  int height = connection.session()->video_header().height;
+  std::string device_name = connection.session()->device_name();
+  bool has_audio = connection.session()->audio_enabled();
+  connection.Disconnect();
+
+  auto setup =
+      CreateStreamer(std::make_shared<RedroidConnectionObserverFactory>(
+                         input, FLAGS_adb_serial),
+                     AdbPort(FLAGS_adb_serial));
+  if (!setup) {
+    return 1;
+  }
+  auto display = setup->streamer->AddDisplay(kDisplayLabel, width, height, dpi,
+                                             /*touch_enabled=*/true);
+  if (!display) {
+    LOG(ERROR) << "Failed to add display";
+    return 1;
+  }
+  std::unique_ptr<PcmChunker> audio;
+  if (has_audio) {
+    audio = std::make_unique<PcmChunker>(
+        setup->streamer->AddAudioStream(kAudioLabel));
+  }
+  setup->streamer->SetHardwareSpec("Device", device_name);
+  setup->streamer->SetHardwareSpec("adb", FLAGS_adb_serial);
+  FrameRepeater repeater(display);
+  input->on_client_connected = [&repeater] { repeater.SendLastFrame(); };
+  Register(*setup->streamer);
+  LOG(INFO) << "Streaming '" << device_name << "' " << width << "x" << height
+            << " dpi " << dpi << (has_audio ? " with audio" : " without audio");
+
+  auto backoff = std::chrono::seconds(1);
+  while (g_running) {
+    if (connection.Connect(&repeater, audio.get())) {
+      backoff = std::chrono::seconds(1);
+      const auto& header = connection.session()->video_header();
+      if (static_cast<int>(header.width) != width ||
+          static_cast<int>(header.height) != height) {
+        LOG(WARNING) << "Device resolution changed to " << header.width << "x"
+                     << header.height << " (display created as " << width << "x"
+                     << height << ")";
+      }
+      connection.WaitForDisconnect();
+      connection.Disconnect();
+    }
+    if (!g_running) {
+      break;
+    }
+    LOG(WARNING) << "Reconnecting to " << adb.serial() << " in "
+                 << backoff.count() << "s";
+    std::this_thread::sleep_for(backoff);
+    backoff = std::min(backoff * 2, std::chrono::seconds(30));
+    WaitForDevice(adb);
+  }
+
+  setup->streamer->Unregister();
   return 0;
 }
 
@@ -191,7 +539,21 @@ int main(int argc, char** argv) {
   absl::InitializeLog();
   absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfo);
   gflags::ParseCommandLineFlags(&argc, &argv, true);
-  signal(SIGINT, [](int) { redroid::g_running = false; });
-  signal(SIGTERM, [](int) { redroid::g_running = false; });
-  return redroid::Main();
+  auto on_signal = [](int) {
+    redroid::g_running = false;
+    if (redroid::g_connection) {
+      redroid::g_connection->Interrupt();
+    }
+  };
+  signal(SIGINT, on_signal);
+  signal(SIGTERM, on_signal);
+  signal(SIGPIPE, SIG_IGN);
+  if (FLAGS_source == "test_pattern") {
+    return redroid::RunTestPattern();
+  }
+  if (FLAGS_source != "scrcpy") {
+    LOG(ERROR) << "Unknown --source " << FLAGS_source;
+    return 1;
+  }
+  return redroid::RunScrcpy();
 }

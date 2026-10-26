@@ -11,6 +11,9 @@ WEBRTC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CF_SRC="${1:-$HOME/src/android-cuttlefish}"
 OUT="${2:-$HOME/redroid-webrtc}"
 CF_COMMIT="$(cat "$WEBRTC_DIR/CUTTLEFISH_VERSION")"
+# scrcpy server pushed to the device (Apache-2.0, github.com/Genymobile/scrcpy)
+SCRCPY_VERSION=3.3.1
+SCRCPY_SHA256=a0f70b20aa4998fbf658c94118cd6c8dab6abbb0647a3bdab344d70bc1ebcbb8
 # Extra bazel flags, e.g. BAZEL_FLAGS="--jobs=4" on small hosts (~/.bazelrc also applies).
 read -r -a BAZEL_FLAGS <<< "${BAZEL_FLAGS:-}"
 
@@ -42,11 +45,19 @@ mkdir -p "$PKG"
 cp "$WEBRTC_DIR"/streamer/*.{h,cpp} "$WEBRTC_DIR"/streamer/BUILD.bazel "$PKG"/
 
 (cd "$CF_SRC/base/cvd" &&
-  bazel build ${BAZEL_FLAGS[@]+"${BAZEL_FLAGS[@]}"} //cuttlefish/host/frontend/redroid_webrtc:redroid_webrtc)
+  bazel build ${BAZEL_FLAGS[@]+"${BAZEL_FLAGS[@]}"} //cuttlefish/host/frontend/redroid_webrtc:redroid_webrtc &&
+  if [ -z "${SKIP_TESTS:-}" ]; then
+    bazel test ${BAZEL_FLAGS[@]+"${BAZEL_FLAGS[@]}"} //cuttlefish/host/frontend/redroid_webrtc:all
+  fi)
 
 (cd "$CF_SRC/frontend/src/operator" && go build -o "$CF_SRC/frontend/out/operator" .)
 
 mkdir -p "$OUT/bin" "$OUT/operator/static" "$OUT/operator/intercept"
+if ! echo "$SCRCPY_SHA256  $OUT/scrcpy-server" | sha256sum -c --status 2>/dev/null; then
+  wget -q -O "$OUT/scrcpy-server" \
+    "https://github.com/Genymobile/scrcpy/releases/download/v$SCRCPY_VERSION/scrcpy-server-v$SCRCPY_VERSION"
+  echo "$SCRCPY_SHA256  $OUT/scrcpy-server" | sha256sum -c
+fi
 install -m 0755 "$CF_SRC/base/cvd/bazel-bin/cuttlefish/host/frontend/redroid_webrtc/redroid_webrtc" "$OUT/bin/"
 install -m 0755 "$CF_SRC/frontend/out/operator" "$OUT/bin/"
 rm -rf "$OUT/html_client"
