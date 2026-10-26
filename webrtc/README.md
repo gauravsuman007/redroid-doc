@@ -1,0 +1,161 @@
+# Web access to redroid (WebRTC)
+
+Open your redroid containers in a web browser: live screen, touch, mouse
+wheel, keyboard, hardware buttons, device audio and an adb console, with no
+client to install.
+
+This reuses the WebRTC stack of [Cuttlefish](https://github.com/google/android-cuttlefish)
+(its operator, streaming library and HTML client). It talks to stock redroid
+images over adb, through a [scrcpy](https://github.com/Genymobile/scrcpy)
+server pushed to the device at runtime, so you **don't need to rebuild your
+redroid images**.
+
+```
+ browser ── HTTPS/WebSocket (signaling) ──► redroid-webrtc container (host network)
+    ▲                                       ├─ operator: web UI + signaling (:8443, :8080)
+    └── WebRTC media (UDP 15550-15599) ─────┤─ redroid_webrtc (one per device)
+                                            │    └─ adb ─► scrcpy-server on the device
+                                            ▼
+                          redroid1 (172.30.0.11:5555), redroid2, …
+```
+
+## Quick start
+
+On a Linux host that already runs redroid (see the main [README](../README.md)):
+
+```bash
+git clone https://github.com/remote-android/redroid-doc.git
+cd redroid-doc/webrtc
+docker compose up -d
+```
+
+Then open `https://<host>:8443/` (self-signed certificate) or
+`http://<host>:8080/`, and pick a device. The first build of the
+`redroid-webrtc` image compiles Cuttlefish's WebRTC stack and takes about an
+hour. Later builds use the cache.
+
+### Host requirements
+
+| Requirement | Why | Check |
+|---|---|---|
+| `binder_linux` module | redroid itself | `grep binder /proc/filesystems` |
+| Kernel with `CONFIG_DMABUF_HEAPS` | Android's video encoder (used for streaming) allocates buffers there. Without it the screen stays black and no encoder is available. | `ls /dev/dma_heap` |
+| Android 11+ image | audio capture (video and input work on older versions too) | |
+
+Stock Ubuntu 22.04/24.04 kernels meet these. Some VM kernels don't. For
+example, OrbStack has binder but no DMA-BUF heaps. On Apple Silicon Macs, use a
+stock Ubuntu arm64 VM such as Lima, UTM or VMware Fusion.
+
+## Configuration
+
+`docker-compose.yml` runs one redroid container (`redroid1`) and the
+`redroid-webrtc` container. To add devices, copy the `redroid1` service with
+a new name and IP, then list it in `REDROID_DEVICES`:
+
+```yaml
+REDROID_DEVICES: "redroid1=172.30.0.11:5555,redroid2=172.30.0.12:5555"
+```
+
+Environment variables of `redroid-webrtc`:
+
+| Variable | Default | Description |
+|---|---|---|
+| `REDROID_DEVICES` | required | Comma separated `name=host:port` entries (`host:port` alone uses the host as name) |
+| `HTTPS_PORT` | `8443` | Web UI over HTTPS (`0` disables) |
+| `HTTP_PORT` | `8080` | Web UI over plain HTTP |
+| `LISTEN_ADDR` | `0.0.0.0` | Address the web UI listens on |
+| `UDP_PORT_MIN` / `UDP_PORT_MAX` | `15550` / `15599` | UDP ports for WebRTC media, shared by all devices |
+| `TLS_CERT_DIR` | `/var/lib/redroid-webrtc/cert` | `cert.pem` and `key.pem`. A self-signed pair is generated if missing. |
+| `STREAMER_ARGS` | | Extra `redroid_webrtc` flags for every device, e.g. `--video_bit_rate=4000000 --fps=60 --audio=false` |
+
+Why host networking: browsers connect to the WebRTC media ports on the
+addresses the streamer advertises, so the streamer must see the host's real
+addresses. It reaches the redroid containers via their fixed IPs on the
+`redroid` bridge network. The web UI and streamers must share one network
+namespace, because the operator reaches each streamer on `127.0.0.1`.
+
+### Remote access and NAT
+
+On a LAN, the published UDP range is enough. Across NATs or firewalls, run a
+TURN server (for example coturn) and point the operator at it with
+`--infra_config_delegate`. That's a script that prints the ICE server
+configuration, see Cuttlefish's operator.
+
+## Security
+
+The web UI has **no authentication**. Anyone who can reach it controls the
+devices, including a full adb shell from the browser. Keep it on a trusted
+network, or bind it to localhost (`LISTEN_ADDR=127.0.0.1`) and put an
+authenticating reverse proxy in front of it (for example Caddy with
+`basic_auth`, oauth2-proxy, Tailscale or Cloudflare Access). Don't publish
+the redroid containers' adb port (5555) either.
+
+## Features
+
+| | Status |
+|---|---|
+| Screen (H.264 from the device, re-encoded to VP8 for the browser) | ✅ |
+| Touch, multi-touch, mouse, wheel scroll | ✅ |
+| Keyboard (click the screen first, US layout key codes, modifiers) | ✅ |
+| Power, back, home, overview (menu), volume buttons | ✅ |
+| Device audio (Android 11+) | ✅ |
+| adb console in the browser (Cuttlefish's adb.js over a data channel) | ✅ |
+| Multiple devices, device list page | ✅ |
+| Auto reconnect after device restarts | ✅ |
+| Rotation, camera, microphone, sensors, location, bluetooth | ❌ (not implemented) |
+
+## Troubleshooting
+
+* **Black screen / "Could not connect to the scrcpy server" in the logs.**
+  Check `/dev/dma_heap` on the host (see host requirements), then run
+  `adb connect <ip>:5555 && adb shell getprop sys.boot_completed`.
+* **"Video stream unavailable … H.264 encoder" in the logs.** The image has no
+  usable H.264 encoder. That's usually the same DMA-BUF heap issue.
+* **The page loads but video never starts.** WebRTC can't reach the UDP
+  ports. Open `UDP_PORT_MIN`–`UDP_PORT_MAX` on the host firewall, or set up
+  TURN for NAT.
+* **Logs:** `docker compose logs -f redroid-webrtc`. Each line is prefixed
+  with the device name.
+
+## Development
+
+`streamer/` holds the C++ streamer (`redroid_webrtc`). It builds inside the
+android-cuttlefish Bazel workspace, pinned in `CUTTLEFISH_VERSION`, with the
+patches in `patches/`. On a Linux host (Ubuntu 24.04):
+
+```bash
+scripts/dev-build.sh            # clone/patch cuttlefish, build, test, install to ~/redroid-webrtc
+scripts/format.sh               # clang-format with cuttlefish's style (the build checks it)
+docker buildx build -f docker/Dockerfile -t redroid/webrtc \
+  --build-context artifacts=$HOME/redroid-webrtc .   # package a dev build
+```
+
+Run a streamer by hand against the operator from the dev build:
+
+```bash
+cd ~/redroid-webrtc/operator && ../bin/operator --socket_path=/tmp/op --http_port=8080 &
+~/redroid-webrtc/bin/redroid_webrtc --device_id=dev --operator_path=/tmp/op \
+  --client_dir=$HOME/redroid-webrtc/html_client \
+  --scrcpy_server=$HOME/redroid-webrtc/scrcpy-server --adb_serial=172.17.0.2:5555
+# --source=test_pattern streams a test pattern without any device
+```
+
+Source layout:
+
+| Path | |
+|---|---|
+| `streamer/main.cpp` | flags, WebRTC setup, reconnect loop, frame repeater, audio chunking |
+| `streamer/scrcpy_session.*` | starts scrcpy-server through adb, reads the video, audio and control sockets |
+| `streamer/scrcpy_protocol.*` | scrcpy 3.x wire format (tested in `scrcpy_protocol_test.cpp`) |
+| `streamer/h264_decoder.*` | FFmpeg H.264 decoding to frames for the streamer |
+| `streamer/redroid_connection_observer.*` | browser input to scrcpy control messages, adb channel |
+| `streamer/keymap.*` | Linux to Android key codes and meta state |
+| `patches/` | small changes to Cuttlefish, also suitable for upstreaming |
+| `operator-static/` | the device list page |
+
+## Licenses
+
+redroid-webrtc is under the Apache License 2.0. It builds on Cuttlefish
+(Apache 2.0), libwebrtc (BSD), scrcpy-server (Apache 2.0, downloaded at build
+time with a pinned checksum) and FFmpeg (LGPL 2.1+, linked dynamically from
+the distribution packages).

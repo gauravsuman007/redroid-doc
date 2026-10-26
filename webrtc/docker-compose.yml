@@ -1,0 +1,64 @@
+# Browser access to redroid containers.
+#
+#   docker compose up -d
+#   open https://<host>:8443/   (self-signed certificate, or http://<host>:8080/)
+#
+# Host requirements (see README.md): binder_linux loaded, and a kernel with
+# CONFIG_DMABUF_HEAPS (/dev/dma_heap present), e.g. stock Ubuntu 22.04/24.04.
+#
+# redroid-webrtc uses the host network: WebRTC advertises the host's own
+# addresses to browsers, and it reaches each redroid container through its
+# fixed IP on the redroid bridge network. Add devices by copying a redroid
+# service and appending it to REDROID_DEVICES.
+
+x-redroid: &redroid
+  image: redroid/redroid:14.0.0_64only-latest
+  privileged: true
+  restart: unless-stopped
+
+services:
+  redroid1:
+    <<: *redroid
+    volumes:
+      - ./data/redroid1:/data
+    command:
+      - androidboot.redroid_width=720
+      - androidboot.redroid_height=1280
+      - androidboot.redroid_dpi=320
+      - androidboot.redroid_fps=30
+    networks:
+      redroid:
+        ipv4_address: 172.30.0.11
+
+  # redroid2:
+  #   <<: *redroid
+  #   volumes:
+  #     - ./data/redroid2:/data
+  #   networks:
+  #     redroid:
+  #       ipv4_address: 172.30.0.12
+
+  redroid-webrtc:
+    image: ${REDROID_WEBRTC_IMAGE:-redroid/webrtc:latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      REDROID_DEVICES: "redroid1=172.30.0.11:5555"
+      # REDROID_DEVICES: "redroid1=172.30.0.11:5555,redroid2=172.30.0.12:5555"
+      HTTPS_PORT: "8443"
+      HTTP_PORT: "8080"
+      UDP_PORT_MIN: "15550"
+      UDP_PORT_MAX: "15599"
+    volumes:
+      - ./data/webrtc-cert:/var/lib/redroid-webrtc/cert
+    depends_on:
+      - redroid1
+
+networks:
+  redroid:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
