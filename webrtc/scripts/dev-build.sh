@@ -14,8 +14,10 @@ CF_COMMIT="$(cat "$WEBRTC_DIR/CUTTLEFISH_VERSION")"
 # scrcpy server pushed to the device (Apache-2.0, github.com/Genymobile/scrcpy)
 SCRCPY_VERSION=3.3.1
 SCRCPY_SHA256=a0f70b20aa4998fbf658c94118cd6c8dab6abbb0647a3bdab344d70bc1ebcbb8
-# Extra bazel flags, e.g. BAZEL_FLAGS="--jobs=4" on small hosts (~/.bazelrc also applies).
-read -r -a BAZEL_FLAGS <<< "${BAZEL_FLAGS:-}"
+# Bazel flags. Optimized by default: the -O0 default build is several times
+# slower at decoding/converting/encoding video. E.g. BAZEL_FLAGS="-c opt --jobs=4"
+# on small hosts (~/.bazelrc also applies).
+read -r -a BAZEL_FLAGS <<< "${BAZEL_FLAGS:--c opt}"
 
 if [ ! -d "$CF_SRC/.git" ]; then
   git clone --filter=blob:none https://github.com/google/android-cuttlefish.git "$CF_SRC"

@@ -23,32 +23,50 @@ extern "C" {
 
 #include <libyuv.h>
 
+#include <cstring>
+#include <memory>
+
 #include "absl/log/log.h"
 #include "drm/drm_fourcc.h"
 
 namespace redroid {
 namespace {
 
-// An ABGR8888 frame owning its pixels.
-class AbgrFrame : public cuttlefish::VideoFrameBuffer {
+// A planar I420 frame owning its pixels: Y (stride = width), then U and V
+// (stride = (width + 1) / 2), contiguous. The cuttlefish streamer passes it
+// to the encoder without conversion (patches/0003). Not zero initialized: the
+// copy writes every byte.
+class I420Frame : public cuttlefish::VideoFrameBuffer {
  public:
-  AbgrFrame(int width, int height)
-      : width_(width), height_(height), data_(width * height * 4) {}
+  I420Frame(int width, int height)
+      : width_(width),
+        height_(height),
+        data_(std::make_unique_for_overwrite<uint8_t[]>(DataSize())) {}
 
   int width() const override { return width_; }
   int height() const override { return height_; }
-  uint8_t* Data() const override { return const_cast<uint8_t*>(data_.data()); }
-  int Stride() const override { return width_ * 4; }
-  size_t DataSize() const override { return data_.size(); }
-  uint32_t PixelFormat() const override { return DRM_FORMAT_ABGR8888; }
+  uint8_t* Data() const override { return data_.get(); }
+  int Stride() const override { return width_; }
+  int ChromaStride() const { return (width_ + 1) / 2; }
+  uint8_t* DataU() const { return data_.get() + width_ * height_; }
+  uint8_t* DataV() const {
+    return DataU() + ChromaStride() * ((height_ + 1) / 2);
+  }
+  size_t DataSize() const override {
+    return static_cast<size_t>(width_) * height_ +
+           2 * static_cast<size_t>(ChromaStride()) * ((height_ + 1) / 2);
+  }
+  uint32_t PixelFormat() const override { return DRM_FORMAT_YUV420; }
   std::unique_ptr<VideoFrameBuffer> Clone() const override {
-    return std::make_unique<AbgrFrame>(*this);
+    auto clone = std::make_unique<I420Frame>(width_, height_);
+    memcpy(clone->Data(), Data(), DataSize());
+    return clone;
   }
 
  private:
   int width_;
   int height_;
-  std::vector<uint8_t> data_;
+  std::unique_ptr<uint8_t[]> data_;
 };
 
 }  // namespace
@@ -111,12 +129,12 @@ bool H264Decoder::Decode(const uint8_t* data, size_t size, bool config) {
       av_frame_unref(frame_);
       return false;
     }
-    auto out = std::make_shared<AbgrFrame>(frame_->width, frame_->height);
-    // libyuv's "ABGR" is R,G,B,A in memory, i.e. DRM_FORMAT_ABGR8888.
-    libyuv::I420ToABGR(frame_->data[0], frame_->linesize[0], frame_->data[1],
-                       frame_->linesize[1], frame_->data[2],
-                       frame_->linesize[2], out->Data(), out->Stride(),
-                       frame_->width, frame_->height);
+    auto out = std::make_shared<I420Frame>(frame_->width, frame_->height);
+    libyuv::I420Copy(frame_->data[0], frame_->linesize[0], frame_->data[1],
+                     frame_->linesize[1], frame_->data[2], frame_->linesize[2],
+                     out->Data(), out->Stride(), out->DataU(),
+                     out->ChromaStride(), out->DataV(), out->ChromaStride(),
+                     frame_->width, frame_->height);
     av_frame_unref(frame_);
     on_frame_(std::move(out));
   }

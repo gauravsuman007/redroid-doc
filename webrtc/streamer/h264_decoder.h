@@ -31,7 +31,8 @@ struct AVPacket;
 
 namespace redroid {
 
-// Decodes an H.264 elementary stream (as sent by scrcpy) into ABGR8888 frames.
+// Decodes an H.264 elementary stream (as sent by scrcpy) into planar I420
+// frames (DRM_FORMAT_YUV420, needs patches/0003 in the cuttlefish streamer).
 class H264Decoder {
  public:
   using FrameCallback =
