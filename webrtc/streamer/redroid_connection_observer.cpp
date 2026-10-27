@@ -83,6 +83,13 @@ Result<void> RedroidConnectionObserver::Key(int32_t android_keycode,
   int32_t meta;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    // The web UI's buttons also send "up" when the pointer merely leaves
+    // them; Android handles an unpaired up as a press, so drop those.
+    if (down) {
+      pressed_keys_.insert(android_keycode);
+    } else if (!pressed_keys_.erase(android_keycode)) {
+      return {};
+    }
     meta = meta_state_.Update(android_keycode, down);
   }
   input_->Send(scrcpy::InjectKeycode(

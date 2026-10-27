@@ -139,6 +139,7 @@ class RedroidConnectionObserver
   std::function<bool(const Json::Value)> control_sender_;
   std::mutex mutex_;
   std::set<int64_t> active_pointers_;
+  std::set<int32_t> pressed_keys_;
   MetaState meta_state_;
   int last_x_ = -1;
   int last_y_ = -1;
