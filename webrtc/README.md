@@ -173,6 +173,15 @@ adb port (5555) either.
 * **The page loads but video never starts.** WebRTC can't reach the UDP
   ports. Open `UDP_PORT_MIN`–`UDP_PORT_MAX` on the host firewall, or set up
   TURN for NAT.
+* **Audio is very quiet or silent.** Android applies the media volume to the
+  captured audio, and its default (5 of 15) makes it about 33 dB quieter. The
+  first time a device is streamed, the streamer raises the media volume to
+  the maximum. You'll see the volume panel flash on the device. It remembers
+  that in the `redroid_webrtc_capture_volume_set` global setting, so your
+  own changes are kept afterwards. To redo it, run
+  `adb shell settings delete global redroid_webrtc_capture_volume_set`. To
+  disable it, add `--raise_capture_volume=false` to `STREAMER_ARGS`. Use the
+  volume buttons in the web UI's sidebar to adjust the volume.
 * **Logs:** `docker compose logs -f redroid-webrtc`. Each line is prefixed
   with the device name.
 

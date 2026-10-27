@@ -34,6 +34,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -74,6 +75,10 @@ DEFINE_int32(scrcpy_port, 27183,
              "Local port used to forward the scrcpy sockets.");
 DEFINE_int32(video_bit_rate, 8000000, "Bit rate of the device H.264 encoder.");
 DEFINE_bool(audio, true, "Stream device audio (Android 11+).");
+DEFINE_bool(raise_capture_volume, true,
+            "Set the media volume of the captured output to the maximum the "
+            "first time a device is streamed (Android's default of 5/15 "
+            "makes the stream ~33 dB quieter). Later changes are kept.");
 DEFINE_bool(
     video_passthrough, false,
     "Send the device's H.264 stream to browsers as is instead of decoding "
@@ -368,12 +373,85 @@ int AdbPort(const std::string& serial) {
 }
 
 // Owns one scrcpy session plus its decoder and reports disconnections.
+// Android applies the media volume to what scrcpy captures (the remote submix
+// output), and the default index (5 of 15) attenuates it by ~33 dB. Raise it
+// to the maximum the first time a device is streamed (remembered in a global
+// setting on the device, which lives in /data like the volume), so later
+// choices (volume buttons in the web UI) are kept across restarts. The shell
+// user may not set volumes directly, so press volume up; while capturing, the
+// volume keys adjust the remote submix device.
+constexpr auto kCaptureVolumeSetting = "redroid_webrtc_capture_volume_set";
+
+struct MusicVolume {
+  int max = 15;
+  int remote_submix = -1;  // -1: unknown
+};
+
+// Parses the STREAM_MUSIC section of `dumpsys audio`.
+std::optional<MusicVolume> ReadMusicVolume(const Adb& adb) {
+  auto dump = adb.Shell("dumpsys audio");
+  if (!dump) {
+    return std::nullopt;
+  }
+  auto begin = dump->find("- STREAM_MUSIC:");
+  if (begin == std::string::npos) {
+    return std::nullopt;
+  }
+  auto end = dump->find("\n- STREAM_", begin + 1);
+  std::string section = dump->substr(
+      begin, end == std::string::npos ? std::string::npos : end - begin);
+  MusicVolume volume;
+  if (auto pos = section.find("Max: "); pos != std::string::npos) {
+    volume.max = std::clamp(atoi(section.c_str() + pos + 5), 1, 100);
+  }
+  constexpr std::string_view kSubmix = "(remote_submix): ";
+  if (auto pos = section.find(kSubmix); pos != std::string::npos) {
+    volume.remote_submix = atoi(section.c_str() + pos + kSubmix.size());
+  }
+  return volume;
+}
+
+void RaiseCaptureVolumeOnce(const Adb& adb, DeviceInput& input) {
+  auto marker =
+      adb.Shell(std::string("settings get global ") + kCaptureVolumeSetting);
+  if (!marker || marker->rfind("1", 0) == 0) {
+    return;
+  }
+  for (int attempt = 0; attempt < 3 && g_running; attempt++) {
+    auto volume = ReadMusicVolume(adb);
+    if (!volume) {
+      return;
+    }
+    if (volume->remote_submix >= volume->max) {
+      adb.Shell(std::string("settings put global ") + kCaptureVolumeSetting +
+                " 1");
+      LOG(INFO) << "Captured media volume is at its maximum (" << volume->max
+                << ")";
+      return;
+    }
+    LOG(INFO) << "Raising the captured media volume from "
+              << volume->remote_submix << " to " << volume->max
+              << " (first stream of this device)";
+    // One extra press: the first one may only show the volume panel.
+    for (int i = 0; i <= volume->max; i++) {
+      for (uint8_t action : {scrcpy::kActionDown, scrcpy::kActionUp}) {
+        input.Send(
+            scrcpy::InjectKeycode(action, kAndroidKeycodeVolumeUp, 0, 0));
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+  }
+  LOG(WARNING) << "Could not raise the captured media volume";
+}
+
 class DeviceConnection {
  public:
   DeviceConnection(const Adb& adb, std::shared_ptr<DeviceInput> input)
       : adb_(adb), input_(std::move(input)) {}
 
-  bool Connect(FrameRepeater* repeater, PcmChunker* audio) {
+  // probe: short-lived session used only to read the stream properties.
+  bool Connect(FrameRepeater* repeater, PcmChunker* audio, bool probe = false) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       disconnected_ = false;
@@ -440,6 +518,9 @@ class DeviceConnection {
         [session = session_.get()](const std::vector<uint8_t>& msg) {
           return session->SendControl(msg);
         });
+    if (!probe && FLAGS_raise_capture_volume && session_->audio_enabled()) {
+      RaiseCaptureVolumeOnce(adb_, *input_);
+    }
     return true;
   }
 
@@ -500,7 +581,7 @@ int RunScrcpy() {
 
   // The first session tells us the display size and whether audio works,
   // which are needed to create the WebRTC tracks before any frame flows.
-  if (!connection.Connect(nullptr, nullptr)) {
+  if (!connection.Connect(nullptr, nullptr, /*probe=*/true)) {
     LOG(ERROR) << "Failed to start scrcpy on " << adb.serial();
     return 1;
   }
