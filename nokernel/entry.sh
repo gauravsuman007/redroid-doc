@@ -16,6 +16,9 @@
 #   3. no /dev/dma_heap -> create /dev/dma_heap/system as a /dev/null node so
 #      Codec2 is enabled; libdmaheap_shim.so (LD_PRELOAD) does the allocation.
 #      Only when NK_DMAHEAP=1 (needs the shim, else codecs fail outright).
+#   4. kernel.unprivileged_bpf_disabled locked to 1 -> bpfloader fails and init
+#      reboots. Provide a writable copy at /dev/.nk-vm/; run.sh mounts
+#      out/<ver>/bpfloader.patched over /system/bin/bpfloader.
 set -u
 bb=/.nk/out/busybox
 
@@ -30,10 +33,18 @@ fi
 
 if [ ! -e /proc/sys/vm/mmap_rnd_compat_bits ]; then
   # init remounts /proc, so a fake under /proc/sys/vm would be hidden;
-  # patched init (patch-init.py) reads this /dev path instead.
+  # patched init (patch-binaries.py) reads this /dev path instead.
   $bb mkdir -p /dev/.nk-vm
   echo 16 > /dev/.nk-vm/mmap_rnd_compat_bits
   echo "nokernel: fake mmap_rnd_compat_bits at /dev/.nk-vm (no CONFIG_COMPAT)" > /dev/kmsg
+fi
+
+if [ "$($bb cat /proc/sys/kernel/unprivileged_bpf_disabled 2>/dev/null)" = 1 ]; then
+  # locked by the host (e.g. Alpine's sysctl defaults): bpfloader's write of 0
+  # fails and init reboots. The patched bpfloader writes here instead.
+  $bb mkdir -p /dev/.nk-vm
+  echo 1 > /dev/.nk-vm/unprivileged_bpf_disabled
+  echo "nokernel: unprivileged_bpf_disabled locked by host, using /dev/.nk-vm" > /dev/kmsg
 fi
 
 if [ "${NK_DMAHEAP:-0}" = 1 ] && [ ! -e /dev/dma_heap/system ]; then

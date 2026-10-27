@@ -11,7 +11,8 @@
 #       `setenv LD_PRELOAD libdmaheap_shim.so` appended to their services.
 #       Whole directories are mounted because apexd bind-mounts
 #       /system/apex/<name> non-recursively, which hides single-file mounts.
-#   out/<ver>/init.patched       (Android 12/13 only, see patch-init.py)
+#   out/<ver>/init.patched       (Android 12/13 only)
+#   out/<ver>/bpfloader.patched  (see patch-binaries.py)
 #
 # Only arm64 images are supported for now (the shim uses arm64 syscalls).
 set -eu
@@ -45,7 +46,12 @@ for apex in com.android.media.swcodec com.android.adbd; do
 done
 if [ "$v" -le 13 ] && [ ! -f "$out/init.patched" ]; then
   docker cp -L "$cid:/system/bin/init" "$out/init.orig"
-  python3 -I "$here/patch-init.py" "$out/init.orig"
+  python3 -I "$here/patch-binaries.py" init "$out/init.orig" "$out/init.patched"
   chmod 755 "$out/init.patched"
+fi
+if [ ! -f "$out/bpfloader.orig" ]; then
+  docker cp -L "$cid:/system/bin/bpfloader" "$out/bpfloader.orig"
+  python3 -I "$here/patch-binaries.py" bpfloader "$out/bpfloader.orig" "$out/bpfloader.patched"
+  [ -f "$out/bpfloader.patched" ] && chmod 755 "$out/bpfloader.patched"
 fi
 echo "prepared $out"

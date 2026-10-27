@@ -16,9 +16,13 @@ set -- --name "$name" --privileged -p "$port:5555" \
   -v "$out/com.android.media.swcodec:/system/apex/com.android.media.swcodec:ro" \
   -v "$out/com.android.adbd:/system/apex/com.android.adbd:ro" \
   -v "$here/dmaheap-shim/libdmaheap_shim.so:/system/lib64/libdmaheap_shim.so:ro"
-# the patched init reads a value entry.sh only writes when the kernel lacks it
+# the patched binaries read values entry.sh only writes when the host needs it
 if [ -f "$out/init.patched" ] && [ ! -e /proc/sys/vm/mmap_rnd_compat_bits ]; then
   set -- "$@" -v "$out/init.patched:/system/bin/init:ro"
+fi
+if [ -f "$out/bpfloader.patched" ] &&
+   [ "$(cat /proc/sys/kernel/unprivileged_bpf_disabled 2>/dev/null)" = 1 ]; then
+  set -- "$@" -v "$out/bpfloader.patched:/system/bin/bpfloader:ro"
 fi
 exec docker run -d "$@" --entrypoint /.nk/out/busybox "$img" \
   sh /.nk/entry.sh qemu=1 androidboot.hardware=redroid androidboot.use_memfd=1
