@@ -116,6 +116,8 @@ constexpr auto kDisplayLabel = "display_0";
 constexpr auto kAudioLabel = "audio-0";
 
 std::atomic<bool> g_running{true};
+// Rotation polls left at a short interval, after a rotation request.
+std::atomic<int> g_fast_rotation_polls{0};
 
 int64_t NowUs() {
   return std::chrono::duration_cast<std::chrono::microseconds>(
@@ -664,6 +666,7 @@ int RunScrcpy() {
     }
     int target = (current + quarter_turns) % 4;
     LOG(INFO) << "Rotating display to " << target * 90 << " degrees";
+    g_fast_rotation_polls = 15;
     adb.Shell(
         "settings put system accelerometer_rotation 0 && "
         "settings put system user_rotation " +
@@ -708,7 +711,14 @@ int RunScrcpy() {
             source->set_rotation(atoi(out->c_str() + pos + 9));
           }
         }
-        for (int i = 0; i < 5 && g_running; i++) {
+        // Poll every 200ms for a while after a rotation request, so frames
+        // are not sent sideways until the next regular (1s) poll.
+        if (g_fast_rotation_polls > 0) {
+          g_fast_rotation_polls--;
+          std::this_thread::sleep_for(std::chrono::milliseconds(200));
+          continue;
+        }
+        for (int i = 0; i < 5 && g_running && g_fast_rotation_polls == 0; i++) {
           std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
       }
