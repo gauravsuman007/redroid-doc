@@ -154,6 +154,15 @@ adb port (5555) either.
 | Device rotation (stream and touch follow the device orientation) | ✅ |
 | Rotate button of the web UI, camera, microphone, sensors, location, bluetooth | ❌ (not implemented) |
 
+### Tested with
+
+| redroid image (arm64, stock Ubuntu 24.04 kernel, no GPU) | Result |
+|---|---|
+| `12.0.0_64only` | ✅ video, audio, input |
+| `13.0.0_64only` | ✅ video, audio, input |
+| `14.0.0_64only` | ✅ video, audio, input, rotation, passthrough |
+| `16.0.0_64only` | ❌ Android doesn't boot on this host: SurfaceFlinger aborts with `output buffer not gpu writeable` in software rendering. That's a redroid issue, not specific to WebRTC. |
+
 ## Troubleshooting
 
 * **Black screen / "Could not connect to the scrcpy server" in the logs.**
