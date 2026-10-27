@@ -36,6 +36,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include "absl/log/globals.h"
@@ -46,6 +47,7 @@
 #include "cuttlefish/host/frontend/redroid_webrtc/adb.h"
 #include "cuttlefish/host/frontend/redroid_webrtc/h264_decoder.h"
 #include "cuttlefish/host/frontend/redroid_webrtc/h264_passthrough.h"
+#include "cuttlefish/host/frontend/redroid_webrtc/hwc_frame_source.h"
 #include "cuttlefish/host/frontend/redroid_webrtc/logging_connection_observer.h"
 #include "cuttlefish/host/frontend/redroid_webrtc/redroid_connection_observer.h"
 #include "cuttlefish/host/frontend/redroid_webrtc/scrcpy_protocol.h"
@@ -58,7 +60,12 @@
 #include "cuttlefish/host/frontend/webrtc/libdevice/streamer.h"
 #include "cuttlefish/host/frontend/webrtc/libdevice/video_sink.h"
 
-DEFINE_string(source, "scrcpy", "Frame/input source: scrcpy or test_pattern.");
+DEFINE_string(source, "scrcpy",
+              "Frame source: scrcpy (device H.264 encoder), hwc (raw frames "
+              "from redroid's hwcomposer stream socket) or test_pattern.");
+DEFINE_string(hwc_socket, "",
+              "--source=hwc: path of the device's /ipc/hwcomposer.sock "
+              "(redroid started with androidboot.use_redroid_stream=1).");
 DEFINE_string(device_id, "redroid",
               "Id the device registers with at the operator.");
 DEFINE_string(operator_path, "/run/cuttlefish/operator",
@@ -367,6 +374,23 @@ int ReadDpi(const Adb& adb) {
   return 320;
 }
 
+// Physical display size from `wm size` ("Physical size: 720x1280").
+std::optional<std::pair<int, int>> ReadDisplaySize(const Adb& adb) {
+  auto out = adb.Shell("wm size");
+  if (!out) {
+    return std::nullopt;
+  }
+  auto pos = out->find("Physical size: ");
+  int width = 0, height = 0;
+  if (pos == std::string::npos ||
+      sscanf(out->c_str() + pos, "Physical size: %dx%d", &width, &height) !=
+          2 ||
+      width <= 0 || height <= 0) {
+    return std::nullopt;
+  }
+  return std::make_pair(width, height);
+}
+
 int AdbPort(const std::string& serial) {
   auto colon = serial.rfind(':');
   return colon == std::string::npos ? 0 : atoi(serial.c_str() + colon + 1);
@@ -471,7 +495,10 @@ class DeviceConnection {
         repeater->OnFrame(std::move(frame));
       }
     };
-    if (FLAGS_video_passthrough) {
+    bool hwc = FLAGS_source == "hwc";
+    if (hwc) {
+      // Frames come from the hwcomposer socket, not from scrcpy.
+    } else if (FLAGS_video_passthrough) {
       assembler_ = std::make_unique<H264FrameAssembler>(on_frame);
     } else {
       decoder_ = H264Decoder::Create(on_frame);
@@ -486,6 +513,7 @@ class DeviceConnection {
     options.max_fps = FLAGS_fps;
     options.video_bit_rate = FLAGS_video_bit_rate;
     options.audio = FLAGS_audio;
+    options.video = !hwc;
     ScrcpySession::Callbacks callbacks;
     callbacks.on_video_packet = [this](const scrcpy::PacketHeader& header,
                                        const uint8_t* data, size_t size) {
@@ -587,6 +615,15 @@ int RunScrcpy() {
   }
   int width = connection.session()->video_header().width;
   int height = connection.session()->video_header().height;
+  if (FLAGS_source == "hwc") {
+    auto size = ReadDisplaySize(adb);
+    if (!size) {
+      LOG(ERROR) << "Could not read the display size of " << adb.serial();
+      return 1;
+    }
+    std::tie(width, height) = *size;
+    input->SetScreenSize(width, height);
+  }
   std::string device_name = connection.session()->device_name();
   bool has_audio = connection.session()->audio_enabled();
   connection.Disconnect();
@@ -628,6 +665,40 @@ int RunScrcpy() {
   LOG(INFO) << "Streaming '" << device_name << "' " << width << "x" << height
             << " dpi " << dpi << (has_audio ? " with audio" : " without audio");
 
+  std::unique_ptr<HwcFrameSource> hwc_source;
+  std::thread rotation_poller;
+  if (FLAGS_source == "hwc") {
+    hwc_source = std::make_unique<HwcFrameSource>(
+        FLAGS_hwc_socket, width, height,
+        [&repeater, input](std::shared_ptr<VideoFrameBuffer> frame) {
+          // Rotated frames swap dimensions; touches are in frame coordinates
+          // which match the device's logical (rotated) display.
+          if (frame->width() != input->width() ||
+              frame->height() != input->height()) {
+            LOG(INFO) << "Video size is now " << frame->width() << "x"
+                      << frame->height();
+            input->SetScreenSize(frame->width(), frame->height());
+          }
+          repeater.OnFrame(std::move(frame));
+        });
+    hwc_source->Start();
+    // The hwcomposer stream carries no orientation: poll it.
+    rotation_poller = std::thread([&adb, source = hwc_source.get()] {
+      while (g_running) {
+        if (auto out = adb.Shell("dumpsys window displays 2>/dev/null | grep "
+                                 "-m1 mCurrentRotation")) {
+          auto pos = out->find("ROTATION_");
+          if (pos != std::string::npos) {
+            source->set_rotation(atoi(out->c_str() + pos + 9));
+          }
+        }
+        for (int i = 0; i < 5 && g_running; i++) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+      }
+    });
+  }
+
   auto backoff = std::chrono::seconds(1);
   while (g_running) {
     if (connection.Connect(&repeater, audio.get())) {
@@ -655,6 +726,9 @@ int RunScrcpy() {
     WaitForDevice(adb);
   }
 
+  if (rotation_poller.joinable()) {
+    rotation_poller.join();
+  }
   setup->streamer->Unregister();
   return 0;
 }
@@ -678,7 +752,15 @@ int main(int argc, char** argv) {
   if (FLAGS_source == "test_pattern") {
     return redroid::RunTestPattern();
   }
-  if (FLAGS_source != "scrcpy") {
+  if (FLAGS_source == "hwc" && FLAGS_hwc_socket.empty()) {
+    LOG(ERROR) << "--source=hwc needs --hwc_socket";
+    return 1;
+  }
+  if (FLAGS_source == "hwc" && FLAGS_video_passthrough) {
+    LOG(ERROR) << "--video_passthrough needs --source=scrcpy";
+    return 1;
+  }
+  if (FLAGS_source != "scrcpy" && FLAGS_source != "hwc") {
     LOG(ERROR) << "Unknown --source " << FLAGS_source;
     return 1;
   }

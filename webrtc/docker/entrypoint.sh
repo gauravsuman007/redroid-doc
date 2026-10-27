@@ -24,6 +24,12 @@
 #                     shared by all streamers
 #   STREAMER_ARGS     extra flags for every redroid_webrtc process
 #   TLS_CERT_DIR      directory with cert.pem/key.pem (generated if missing)
+#   IPC_DIR           directory with one subdirectory per device holding that
+#                     device's /ipc (default /var/lib/redroid-webrtc/ipc).
+#                     A device whose directory exists is streamed from its
+#                     hwcomposer socket (--source=hwc, the redroid container
+#                     needs androidboot.use_redroid_stream=1); others go
+#                     through scrcpy's H.264 encoder.
 set -euo pipefail
 
 SHARE=/usr/share/redroid-webrtc
@@ -35,6 +41,7 @@ LISTEN_ADDR="${LISTEN_ADDR:-0.0.0.0}"
 UDP_PORT_MIN="${UDP_PORT_MIN:-15550}"
 UDP_PORT_MAX="${UDP_PORT_MAX:-15599}"
 TLS_CERT_DIR="${TLS_CERT_DIR:-/var/lib/redroid-webrtc/cert}"
+IPC_DIR="${IPC_DIR:-/var/lib/redroid-webrtc/ipc}"
 REDROID_DISCOVERY="${REDROID_DISCOVERY:-}"
 read -r -a EXTRA_ARGS <<< "${STREAMER_ARGS:-}"
 
@@ -106,7 +113,13 @@ adb start-server >/dev/null 2>&1 || true
 start_streamer() {
   local name="$1" serial="$2" port="$next_scrcpy_port"
   next_scrcpy_port=$((next_scrcpy_port + 1))
-  echo "Device $name -> $serial"
+  local source_args=()
+  if [ -d "$IPC_DIR/$name" ]; then
+    source_args=(--source=hwc --hwc_socket="$IPC_DIR/$name/hwcomposer.sock")
+    echo "Device $name -> $serial (raw frames from $IPC_DIR/$name)"
+  else
+    echo "Device $name -> $serial (scrcpy H.264)"
+  fi
   setsid bash -c '
     name="$1" serial="$2" port="$3"; shift 3
     trap "kill -TERM \$child 2>/dev/null; exit 0" TERM
@@ -121,7 +134,8 @@ start_streamer() {
       wait $child || true
       echo "[$name] streamer exited, restarting in 5s" >&2
       sleep 5 & wait $!
-    done' _ "$name" "$serial" "$port" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} &
+    done' _ "$name" "$serial" "$port" ${source_args[@]+"${source_args[@]}"} \
+      ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} &
   streamer_pids[$name]=$!
   streamer_serials[$name]="$serial"
 }

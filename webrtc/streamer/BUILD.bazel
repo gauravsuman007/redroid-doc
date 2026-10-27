@@ -91,6 +91,21 @@ cf_cc_library(
 )
 
 cf_cc_library(
+    name = "hwc_frame_source",
+    srcs = ["hwc_frame_source.cpp"],
+    hdrs = ["hwc_frame_source.h"],
+    deps = [
+        "//cuttlefish/host/libs/screen_connector:video_frame_buffer",
+        "@abseil-cpp//absl/log",
+        "@libdrm//:libdrm_fourcc",
+        "@libyuv",
+    ],
+    clang_tidy_enabled = False,
+    depend_on_what_you_use_enabled = False,
+    include_cleaner_enabled = False,
+)
+
+cf_cc_library(
     name = "logging_connection_observer",
     srcs = ["logging_connection_observer.cpp"],
     hdrs = ["logging_connection_observer.h"],
@@ -133,6 +148,7 @@ cf_cc_binary(
         ":adb",
         ":h264_decoder",
         ":h264_passthrough",
+        ":hwc_frame_source",
         ":logging_connection_observer",
         ":redroid_connection_observer",
         ":scrcpy_protocol",
@@ -182,6 +198,15 @@ cf_cc_test(
     # which can't be resolved across shared objects.
     linkstatic = True,
     deps = [":h264_passthrough"],
+    clang_tidy_enabled = False,
+    depend_on_what_you_use_enabled = False,
+    include_cleaner_enabled = False,
+)
+
+cf_cc_test(
+    name = "hwc_frame_source_test",
+    srcs = ["hwc_frame_source_test.cpp"],
+    deps = [":hwc_frame_source"],
     clang_tidy_enabled = False,
     depend_on_what_you_use_enabled = False,
     include_cleaner_enabled = False,

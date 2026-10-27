@@ -24,7 +24,12 @@ services:
     <<: *redroid
     volumes:
       - ./data/redroid1:/data
+      # hwcomposer stream socket, read by redroid-webrtc (raw frames, no
+      # video encoder on the device). Remove it and use_redroid_stream to
+      # stream through scrcpy's H.264 encoder instead.
+      - ./data/ipc/redroid1:/ipc
     command:
+      - androidboot.use_redroid_stream=1
       - androidboot.redroid_width=720
       - androidboot.redroid_height=1280
       - androidboot.redroid_dpi=320
@@ -37,6 +42,9 @@ services:
   #   <<: *redroid
   #   volumes:
   #     - ./data/redroid2:/data
+  #     - ./data/ipc/redroid2:/ipc
+  #   command:
+  #     - androidboot.use_redroid_stream=1
   #   networks:
   #     redroid:
   #       ipv4_address: 172.30.0.12
@@ -61,6 +69,7 @@ services:
       UDP_PORT_MAX: "15599"
     volumes:
       - ./data/webrtc-cert:/var/lib/redroid-webrtc/cert
+      - ./data/ipc:/var/lib/redroid-webrtc/ipc
       # - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
       - redroid1

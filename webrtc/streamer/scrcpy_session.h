@@ -40,6 +40,7 @@ class ScrcpySession {
     int local_port = 27183;      // local end of `adb forward`
     int max_fps = 30;
     int video_bit_rate = 8000000;
+    bool video = true;  // false: audio and control only
     bool audio = true;
   };
 

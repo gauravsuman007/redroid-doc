@@ -5,10 +5,15 @@ wheel, keyboard, hardware buttons, device audio and an adb console, with no
 client to install.
 
 This reuses the WebRTC stack of [Cuttlefish](https://github.com/google/android-cuttlefish)
-(its operator, streaming library and HTML client). It talks to stock redroid
-images over adb, through a [scrcpy](https://github.com/Genymobile/scrcpy)
-server pushed to the device at runtime, so you **don't need to rebuild your
-redroid images**.
+(its operator, streaming library and HTML client) with **stock redroid
+images, no rebuild needed**:
+
+- **Screen:** raw frames from redroid's own hwcomposer stream socket
+  (`androidboot.use_redroid_stream=1`, the default in `docker-compose.yml`),
+  encoded on the host. Alternatively, H.264 from the device's encoder through
+  [scrcpy](https://github.com/Genymobile/scrcpy).
+- **Input and audio:** through a scrcpy server pushed to the device at runtime
+  over adb.
 
 ```
  browser ── HTTPS/WebSocket (signaling) ──► redroid-webrtc container (host network)
@@ -90,10 +95,25 @@ Environment variables of `redroid-webrtc`:
 | `TLS_CERT_DIR` | `/var/lib/redroid-webrtc/cert` | `cert.pem` and `key.pem`. A self-signed pair is generated if missing. |
 | `STREAMER_ARGS` | | Extra `redroid_webrtc` flags for every device, e.g. `--video_bit_rate=4000000 --fps=60 --audio=false` |
 
-### H.264 passthrough (recommended for many devices)
+### Screen sources
 
-By default the device's H.264 stream is decoded and re-encoded to VP8 for the
-browser. With `STREAMER_ARGS=--video_passthrough`, the device's H.264 goes to
+| | hwcomposer stream (default) | scrcpy H.264 | scrcpy H.264 + `--video_passthrough` |
+|---|---|---|---|
+| Device side | `androidboot.use_redroid_stream=1` and `/ipc` shared with redroid-webrtc | nothing | nothing |
+| Encoding | VP8 on the host | H.264 on the device, decode plus VP8 on the host | H.264 on the device, sent as is |
+| CPU, 720p30 animating, one viewer: streamer / device container | ~20% / ~116% | ~33% / ~260% | ~7% / ~260% |
+| Needs `/dev/dma_heap` (Codec2) for video | no | yes | yes |
+
+The hwcomposer stream is undocumented redroid functionality, tested with the
+redroid 14 image. Each frame's gralloc buffer is passed over
+`/ipc/hwcomposer.sock` and acknowledged by the reader; see
+`streamer/hwc_frame_source.h`. In `REDROID_DEVICES` mode, a device uses it
+when `IPC_DIR/<name>` (`./data/ipc/<name>` in the compose file) exists.
+
+### H.264 passthrough
+
+With the scrcpy source, the device's H.264 stream is by default decoded and
+re-encoded to VP8 for the browser. With `STREAMER_ARGS=--video_passthrough`, the device's H.264 goes to
 the browser unchanged:
 
 | 720p30, screen animating, one viewer (arm64) | CPU of the streamer |
