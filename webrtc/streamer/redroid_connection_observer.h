@@ -50,6 +50,9 @@ class DeviceInput {
 
   // Called whenever a frame is needed right away (e.g. a client connected).
   std::function<void()> on_client_connected;
+  // Rotates the device display by quarter turns (1 = 90deg counterclockwise,
+  // like the web UI's rotate left button).
+  std::function<void(int quarter_turns)> on_rotate;
 
  private:
   std::mutex mutex_;
@@ -133,6 +136,7 @@ class RedroidConnectionObserver
   std::shared_ptr<DeviceInput> input_;
   std::string adb_address_;
   std::unique_ptr<cuttlefish::webrtc_streaming::AdbHandler> adb_handler_;
+  std::function<bool(const Json::Value)> control_sender_;
   std::mutex mutex_;
   std::set<int64_t> active_pointers_;
   MetaState meta_state_;

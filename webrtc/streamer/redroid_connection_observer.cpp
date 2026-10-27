@@ -16,6 +16,8 @@
 
 #include "cuttlefish/host/frontend/redroid_webrtc/redroid_connection_observer.h"
 
+#include <stdio.h>
+
 #include <algorithm>
 
 #include "absl/log/log.h"
@@ -192,7 +194,10 @@ void RedroidConnectionObserver::OnAdbMessage(const uint8_t* msg, size_t size) {
 }
 
 void RedroidConnectionObserver::OnControlChannelOpen(
-    std::function<bool(const Json::Value)>) {}
+    std::function<bool(const Json::Value)> control_message_sender) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  control_sender_ = std::move(control_message_sender);
+}
 
 Result<void> RedroidConnectionObserver::OnLidStateChange(bool) { return {}; }
 void RedroidConnectionObserver::OnHingeAngleChange(int) {}
@@ -232,7 +237,33 @@ void RedroidConnectionObserver::OnBluetoothChannelOpen(
 void RedroidConnectionObserver::OnBluetoothMessage(const uint8_t*, size_t) {}
 void RedroidConnectionObserver::OnSensorsChannelOpen(
     std::function<bool(const uint8_t*, size_t)>) {}
-void RedroidConnectionObserver::OnSensorsMessage(const uint8_t*, size_t) {}
+// The rotate buttons send the device's new orientation as sensor angles
+// "x y z" (z = the client's rotation) and rotate the video with CSS. redroid
+// has no sensors, so rotate the display instead, then reset the client's CSS
+// rotation: the stream itself turns. Each press therefore arrives as +-90.
+void RedroidConnectionObserver::OnSensorsMessage(const uint8_t* msg,
+                                                 size_t size) {
+  double x = 0, y = 0, z = 0;
+  std::string text(reinterpret_cast<const char*>(msg), size);
+  if (sscanf(text.c_str(), "%lf %lf %lf", &x, &y, &z) != 3 || x != 0 ||
+      y != 0) {
+    return;
+  }
+  int quarter_turns = (static_cast<int>(z) / 90 % 4 + 4) % 4;
+  if (static_cast<int>(z) % 90 != 0 || quarter_turns == 0) {
+    return;
+  }
+  if (input_->on_rotate) {
+    input_->on_rotate(quarter_turns);
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (control_sender_) {
+    Json::Value event;
+    event["event"] = "VIRTUAL_DEVICE_SCREEN_CHANGED";
+    event["metadata"]["rotation"] = 0;
+    control_sender_(event);
+  }
+}
 void RedroidConnectionObserver::OnSensorsChannelClosed() {}
 void RedroidConnectionObserver::OnLightsChannelOpen(
     std::function<bool(const Json::Value&)>) {}

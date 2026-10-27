@@ -653,6 +653,22 @@ int RunScrcpy() {
   setup->streamer->SetHardwareSpec("Device", device_name);
   setup->streamer->SetHardwareSpec("adb", FLAGS_adb_serial);
   FrameRepeater repeater(display, /*repeat=*/!FLAGS_video_passthrough);
+  input->on_rotate = [&adb](int quarter_turns) {
+    int current = 0;
+    if (auto out = adb.Shell("dumpsys window displays 2>/dev/null | grep "
+                             "-m1 mCurrentRotation")) {
+      auto pos = out->find("ROTATION_");
+      if (pos != std::string::npos) {
+        current = atoi(out->c_str() + pos + 9) / 90;
+      }
+    }
+    int target = (current + quarter_turns) % 4;
+    LOG(INFO) << "Rotating display to " << target * 90 << " degrees";
+    adb.Shell(
+        "settings put system accelerometer_rotation 0 && "
+        "settings put system user_rotation " +
+        std::to_string(target));
+  };
   input->on_client_connected = [&repeater, input] {
     if (FLAGS_video_passthrough) {
       // New clients need a key frame, and an idle screen sends no frames.
